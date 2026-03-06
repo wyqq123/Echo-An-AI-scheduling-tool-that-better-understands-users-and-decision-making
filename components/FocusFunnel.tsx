@@ -21,7 +21,7 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
   const [isProcessing, setIsProcessing] = useState(false);
   
   // Store Hooks
-  const { focusThemes } = useUserStore();
+  const { focusThemes, tasks: allTasks, setTasks } = useUserStore();
   
   // Flow State
   const [stage, setStage] = useState<'input' | 'preview' | 'decision'>('input');
@@ -31,6 +31,7 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
   // Data State
   const [generatedTasks, setGeneratedTasks] = useState<Task[]>([]);
   const [isSubsequentMode, setIsSubsequentMode] = useState(false);
+  const [iceboxTasks, setIceboxTasks] = useState<Task[]>([]);
   
   // Decision Matrix State
   const [currentStep, setCurrentStep] = useState<FunnelStep>(FunnelStep.STEP_1_ALIGNMENT);
@@ -40,6 +41,7 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
   
   // Logic Tracking
   const [anchorsNeeded, setAnchorsNeeded] = useState<number>(0);
+  const [showToast, setShowToast] = useState<{message: string, visible: boolean}>({ message: '', visible: false });
 
   // --- Handlers ---
 
@@ -47,14 +49,29 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
     if (!input.trim()) return;
     setIsProcessing(true);
     
-    const tasks = await parseBrainDump(input, focusThemes);
+    // Get Icebox Tasks (Frozen tasks from store)
+    const currentIcebox = allTasks.filter(t => t.isFrozen);
+    setIceboxTasks(currentIcebox);
+
+    const tasks = await parseBrainDump(input, focusThemes, currentIcebox);
     
+    // Check for revived tasks
+    const revivedTasks = tasks.filter(t => t.isRevived);
+    if (revivedTasks.length > 0) {
+        const revivedNames = revivedTasks.map(t => t.title).join(', ');
+        setShowToast({ 
+            message: `Detected duplicate intent, revived icebox task(s): ${revivedNames} 🪄`, 
+            visible: true 
+        });
+        setTimeout(() => setShowToast({ message: '', visible: false }), 4000);
+    }
+
     const fullTasks = tasks.map(t => ({
       ...t,
       id: t.id || crypto.randomUUID(),
       status: TaskStatus.CANDIDATE, // Start as Candidate
       isAnchor: false,
-      isFrozen: false,
+      isFrozen: false, // Revived ones are un-frozen
       startTime: undefined
     })) as Task[];
 
@@ -66,13 +83,14 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
     const existingAnchors = existingTasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
     const unfinishedAnchors = existingAnchors.filter(t => !t.completed);
     
-    // Check if subsequent (if we have existing tasks passed in, assume subsequent check logic applies)
-    // Actually, simple check: do we have existing anchors?
     const isSubsequent = existingTasks.length > 0; 
     setIsSubsequentMode(isSubsequent);
 
     const totalCount = fullTasks.length + (isSubsequent ? unfinishedAnchors.length : 0);
 
+    // If we have icebox tasks, we might want to trigger funnel even if count < 4? 
+    // Prompt says: "When system organizes input x >= 4 ... AND when system finds icebox tasks..."
+    // So condition is still >= 4.
     if (totalCount >= 4) {
       setShowFilterModal(true);
     } else {
@@ -111,12 +129,17 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
     const existingAnchors = existingTasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
     const unfinishedAnchors = existingAnchors.filter(t => !t.completed);
     
+    // We need to pass icebox tasks to generateFunnelScript
+    // Filter out icebox tasks that were revived (they are now in generatedTasks)
+    const remainingIcebox = iceboxTasks.filter(it => !generatedTasks.find(gt => gt.id === it.id));
+
     const script = await generateFunnelScript(
       isSubsequentMode,
-      generatedTasks, // Candidates
+      generatedTasks, // Candidates (includes revived)
       unfinishedAnchors,
       focusThemes,
-      format(new Date(), 'HH:mm')
+      format(new Date(), 'HH:mm'),
+      remainingIcebox
     );
     
     setFunnelScript(script);
@@ -134,105 +157,134 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
     let nextTasks = [...generatedTasks];
     let nextStep: FunnelStep | null = null;
     
-    // We also need to update existing tasks if in subsequent mode (e.g. swapping anchors)
-    // But existingTasks prop is read-only. We should probably emit updates to parent.
-    // For now, let's assume we return a merged list or handle it via callback.
-    // The onTasksGenerated callback expects a list of tasks to ADD/UPDATE.
-    // If we modify existing tasks, we should include them in the output.
-    
-    // Let's track modified existing tasks locally to merge at the end
-    // But wait, existingTasks are not in generatedTasks state.
-    // We need a way to track changes to existing tasks (like demoting an anchor).
-    // Let's keep a separate state for "modifiedExistingTasks" or just merge them into generatedTasks temporarily?
-    // Better: generatedTasks only tracks NEW tasks. We will emit everything at the end.
-    
-    // Actually, for Q2 PK in subsequent mode, we might need to modify an existing task.
-    // Let's handle that logic.
+    // Helper to find task in either generated or icebox
+    const findTask = (id: string) => nextTasks.find(t => t.id === id) || iceboxTasks.find(t => t.id === id);
 
     switch (currentStep) {
       case FunnelStep.STEP_1_ALIGNMENT:
         // Q1: Subtraction
-        // If selected, move to PENDING (Drawer)
-        nextTasks = nextTasks.map(t => selectedIds.includes(t.id) ? { ...t, status: TaskStatus.PENDING } : t);
+        // Logic:
+        // If icebox task > 3 days exists (isStale=true):
+        //   - Option A (Drawer): Move to PENDING
+        //   - Option B (Keep Frozen): Do nothing (remains in icebox)
+        // If no stale icebox task:
+        //   - Option A (Drawer): Move to PENDING
+        //   - Option B (Keep): Keep as CANDIDATE (do nothing)
+        
+        if (selectedIds.length > 0) {
+            const targetId = selectedIds[0];
+            // If we selected it to move to drawer
+            // Check if it's in generatedTasks or iceboxTasks
+            const inGenerated = nextTasks.find(t => t.id === targetId);
+            if (inGenerated) {
+                nextTasks = nextTasks.map(t => t.id === targetId ? { ...t, status: TaskStatus.PENDING } : t);
+            } else {
+                // It's in icebox. Move to generatedTasks as PENDING (unfreeze)
+                const inIcebox = iceboxTasks.find(t => t.id === targetId);
+                if (inIcebox) {
+                    nextTasks.push({ ...inIcebox, status: TaskStatus.PENDING, isFrozen: false });
+                    // Remove from local icebox state so it doesn't show up again? 
+                    // Actually, we should probably keep it in iceboxTasks but mark it?
+                    // Simpler to just add to nextTasks, and when rendering, prefer nextTasks.
+                }
+            }
+        }
+        // If not selected (Option B), we do nothing. 
+        // If it was icebox, it stays icebox (unless we explicitly want to revive it as CANDIDATE? Prompt says "Keep Frozen").
+        // If it was new, it stays CANDIDATE.
         
         nextStep = FunnelStep.STEP_2_LEVERAGE;
-        // Pre-select for Q2
         setSelectedIds([]);
-        if (isSubsequentMode) {
-             if (funnelScript.q2.suggestedId) setSelectedIds([funnelScript.q2.suggestedId]);
-        } else {
-             if (funnelScript.q2.suggestedId) setSelectedIds([funnelScript.q2.suggestedId]);
-        }
+        if (funnelScript.q2.suggestedId) setSelectedIds([funnelScript.q2.suggestedId]);
         break;
 
       case FunnelStep.STEP_2_LEVERAGE:
-        // Q2: Leverage (First) or PK (Subsequent)
-        if (isSubsequentMode) {
-           // PK Logic
-           // If user selected the NEW task (challenger), it becomes ANCHOR.
-           // The OLD task (defender) becomes PENDING.
+        // Q2: Leverage
+        // Scenario A: New vs Icebox (No Merge) -> User picks one.
+        // Scenario B: Merged -> User confirms.
+        
+        // Whatever is selected becomes ANCHOR.
+        if (selectedIds.length > 0) {
+            const targetId = selectedIds[0];
+            const inGenerated = nextTasks.find(t => t.id === targetId);
+            
+            if (inGenerated) {
+                nextTasks = nextTasks.map(t => t.id === targetId ? { ...t, status: TaskStatus.ANCHOR } : t);
+            } else {
+                // It's from Icebox. Revive as ANCHOR.
+                const inIcebox = iceboxTasks.find(t => t.id === targetId);
+                if (inIcebox) {
+                    nextTasks.push({ ...inIcebox, status: TaskStatus.ANCHOR, isFrozen: false });
+                }
+            }
+        }
+        
+        // Subsequent Mode Logic (PK Swap)
+        if (isSubsequentMode && funnelScript.q2.oldDefenderId) {
            const challengerId = funnelScript.q2.suggestedId;
-           const defenderId = funnelScript.q2.oldDefenderId;
-           
            if (selectedIds.includes(challengerId)) {
-               // Swap confirmed
-               nextTasks = nextTasks.map(t => t.id === challengerId ? { ...t, status: TaskStatus.ANCHOR } : t);
-               // We need to signal that defenderId is now PENDING.
-               // Since defenderId is in existingTasks, we can't modify it here directly.
-               // We'll handle this in the final emit.
+               // Swap confirmed (Challenger became ANCHOR above)
+               // Defender logic handled in finalizeAndEmit
            } else {
                // Swap rejected. Challenger goes to PENDING.
                nextTasks = nextTasks.map(t => t.id === challengerId ? { ...t, status: TaskStatus.PENDING } : t);
            }
-        } else {
-           // First Time Logic: Selected -> ANCHOR
-           nextTasks = nextTasks.map(t => selectedIds.includes(t.id) ? { ...t, status: TaskStatus.ANCHOR } : t);
         }
 
         nextStep = FunnelStep.STEP_3_FRICTION;
         setSelectedIds([]);
-        if (!isSubsequentMode && funnelScript.q3.suggestedId) {
+        if (funnelScript.q3.suggestedId) {
              setSelectedIds([funnelScript.q3.suggestedId]);
         }
         break;
 
       case FunnelStep.STEP_3_FRICTION:
-        // Q3: Icebreaker (First) or Energy (Subsequent)
-        if (isSubsequentMode) {
-            // Energy Check
-            // If user selects a task, it becomes ANCHOR.
-            // Remaining CANDIDATES -> PENDING
-            if (selectedIds.length > 0) {
-                nextTasks = nextTasks.map(t => selectedIds.includes(t.id) ? { ...t, status: TaskStatus.ANCHOR } : t);
+        // Q3: Icebreaker
+        if (selectedIds.length > 0) {
+            const targetId = selectedIds[0];
+            const inGenerated = nextTasks.find(t => t.id === targetId);
+            if (inGenerated) {
+                nextTasks = nextTasks.map(t => t.id === targetId ? { ...t, status: TaskStatus.ICEBREAKER } : t);
+            } else {
+                const inIcebox = iceboxTasks.find(t => t.id === targetId);
+                if (inIcebox) {
+                    nextTasks.push({ ...inIcebox, status: TaskStatus.ICEBREAKER, isFrozen: false });
+                }
             }
-            // All remaining Candidates -> PENDING
-            nextTasks = nextTasks.map(t => t.status === TaskStatus.CANDIDATE ? { ...t, status: TaskStatus.PENDING } : t);
-            
-            nextStep = FunnelStep.STEP_4_SACRIFICE; // Go to confirmation
-        } else {
-            // First Time: Icebreaker
-            if (selectedIds.length > 0) {
-                const icebreakerId = selectedIds[0];
-                // If it was already ANCHOR, just change to ICEBREAKER.
-                // If it was CANDIDATE, change to ICEBREAKER.
-                nextTasks = nextTasks.map(t => t.id === icebreakerId ? { ...t, status: TaskStatus.ICEBREAKER } : t);
-            }
-            nextStep = FunnelStep.STEP_4_SACRIFICE;
         }
+        
+        // Subsequent Mode Energy Check
+        if (isSubsequentMode) {
+             // Remaining Candidates -> PENDING
+             nextTasks = nextTasks.map(t => t.status === TaskStatus.CANDIDATE ? { ...t, status: TaskStatus.PENDING } : t);
+        }
+        
+        nextStep = FunnelStep.STEP_4_SACRIFICE;
         setSelectedIds([]);
         break;
 
       case FunnelStep.STEP_4_SACRIFICE:
-        // Q4: Final (First) or Confirmation (Subsequent)
+        // Q4: Confirmation
+        // User picks one last Anchor from Remaining Candidates OR Icebox.
+        // Or "None" -> All remaining Candidates -> PENDING.
+        
+        if (selectedIds.length > 0) {
+            const targetId = selectedIds[0];
+            const inGenerated = nextTasks.find(t => t.id === targetId);
+            if (inGenerated) {
+                nextTasks = nextTasks.map(t => t.id === targetId ? { ...t, status: TaskStatus.ANCHOR } : t);
+            } else {
+                const inIcebox = iceboxTasks.find(t => t.id === targetId);
+                if (inIcebox) {
+                    nextTasks.push({ ...inIcebox, status: TaskStatus.ANCHOR, isFrozen: false });
+                }
+            }
+        }
+        
         if (!isSubsequentMode) {
-             // First Time: Pick 1 last anchor
-             if (selectedIds.length > 0) {
-                 nextTasks = nextTasks.map(t => selectedIds.includes(t.id) ? { ...t, status: TaskStatus.ANCHOR } : t);
-             }
              // Remaining Candidates -> PENDING
              nextTasks = nextTasks.map(t => t.status === TaskStatus.CANDIDATE ? { ...t, status: TaskStatus.PENDING } : t);
         }
-        // For subsequent, it's just a confirmation step, no logic needed usually unless we allow final tweaks.
         
         nextStep = null; // Finish
         break;
@@ -327,7 +379,8 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
             ...t, 
             startTime: timeMap.get(t.id),
             dateStr: todayStr, // Default to today
-            isAnchor: true 
+            isAnchor: true,
+            isFrozen: false
         };
       }
       
@@ -337,7 +390,8 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
           startTime: undefined,
           dateStr: undefined, 
           isAnchor: false,
-          status: t.status === TaskStatus.PENDING ? TaskStatus.DRAWER : t.status 
+          status: t.status === TaskStatus.PENDING ? TaskStatus.DRAWER : t.status,
+          isFrozen: false
       };
     });
 
@@ -345,6 +399,136 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
   };
 
   // --- Renderers ---
+
+  const getStepOptions = (step: FunnelStep, tasks: Task[], script: FunnelScript | null) => {
+    // Always start with current candidates from the generated batch
+    const candidates = tasks.filter(t => t.status === TaskStatus.CANDIDATE);
+
+    switch (step) {
+      case FunnelStep.STEP_1_ALIGNMENT:
+        // Q1: Only Yes/No (handled by buttons), no list needed for selection logic in the prompt description,
+        // but user wants to select tasks to move to drawer.
+        // If we have a suggested task (either new or icebox), return it so we can potentially show it if needed,
+        // but the UI mainly relies on the Question Text.
+        return []; 
+
+      case FunnelStep.STEP_2_LEVERAGE:
+        // Q2: Leverage
+        if (!isSubsequentMode) {
+            // First Time
+            if (script?.q2.isMerged && script.q2.mergedTaskId) {
+                // Merged Scenario
+                const merged = tasks.find(t => t.id === script.q2.mergedTaskId) || iceboxTasks.find(t => t.id === script.q2.mergedTaskId);
+                let list = [...candidates];
+                // Ensure merged task is at top
+                if (merged) {
+                    list = list.filter(t => t.id !== merged.id);
+                    list.unshift(merged);
+                }
+                return list;
+            } else {
+                // New vs Icebox Scenario
+                const suggestedId = script?.q2.suggestedId;
+                const allOptions = [...candidates, ...iceboxTasks];
+                return allOptions.sort((a, b) => (a.id === suggestedId ? -1 : 1));
+            }
+        } else {
+            // Subsequent: Show Anchor (Defender) + All Candidates (except PENDING)
+            const defenderId = script?.q2.oldDefenderId;
+            const defender = existingTasks.find(t => t.id === defenderId);
+            
+            let list = [...candidates];
+            if (defender) list.unshift(defender); // Put defender at top
+            return list;
+        }
+
+      case FunnelStep.STEP_3_FRICTION:
+        // Q3: Show remaining candidates (excluding Q1/Q2 decisions)
+        if (!isSubsequentMode) {
+             // Show candidates + icebox tasks (if any left)
+             const allOptions = [...candidates, ...iceboxTasks];
+             return allOptions.sort((a, b) => (a.duration || 0) - (b.duration || 0));
+        } else {
+            // Subsequent: Show remaining candidates + "No Challenge" (handled by button)
+            return candidates;
+        }
+
+      case FunnelStep.STEP_4_SACRIFICE:
+        if (!isSubsequentMode) {
+            // First time: Show remaining candidates + Icebox
+            return [...candidates, ...iceboxTasks];
+        } else {
+            // Subsequent: Show ALL Global Anchors (Existing + New)
+            const existingAnchors = existingTasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
+            const newAnchors = tasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
+            
+            const allAnchors = [...existingAnchors];
+            newAnchors.forEach(na => {
+                if (!allAnchors.find(ea => ea.id === na.id)) allAnchors.push(na);
+            });
+            return allAnchors;
+        }
+
+      default:
+        return [];
+    }
+  };
+
+  const renderTaskOption = (task: Task) => {
+    const isSelected = selectedIds.includes(task.id);
+    // Highlight suggestion logic
+    let isSuggested = false;
+    if (currentStep === FunnelStep.STEP_2_LEVERAGE && !isSubsequentMode && task.id === funnelScript?.q2.suggestedId) isSuggested = true;
+    if (currentStep === FunnelStep.STEP_2_LEVERAGE && isSubsequentMode && task.id === funnelScript?.q2.suggestedId) isSuggested = true; // Challenger
+    if (currentStep === FunnelStep.STEP_3_FRICTION && !isSubsequentMode && task.id === funnelScript?.q3.suggestedId) isSuggested = true;
+
+    // Special styling for Defender in Q2 Subsequent
+    const isDefender = isSubsequentMode && currentStep === FunnelStep.STEP_2_LEVERAGE && task.id === funnelScript?.q2.oldDefenderId;
+    const isIcebox = task.isFrozen;
+
+    return (
+     <div 
+       key={task.id}
+       onClick={() => {
+         if (currentStep === FunnelStep.STEP_4_SACRIFICE && isSubsequentMode) {
+             // Toggle selection for Q4 Subsequent (Confirmation)
+             setSelectedIds(prev => isSelected ? prev.filter(id => id !== task.id) : [...prev, task.id]);
+         } else {
+             // Single select for others
+             if (isSelected) setSelectedIds([]);
+             else setSelectedIds([task.id]);
+         }
+       }}
+       className={`p-4 rounded-xl border transition-all cursor-pointer flex items-center gap-4 relative overflow-hidden
+         ${isSelected 
+           ? 'bg-purple-500/20 border-purple-500' 
+           : 'bg-slate-900 border-slate-800 hover:border-slate-700'}
+         ${isDefender ? 'border-yellow-500/50' : ''}
+         ${isIcebox && !isSelected ? 'border-cyan-900/30 bg-cyan-900/10' : ''}
+       `}
+     >
+       {isSuggested && !isSelected && (
+          <div className="absolute top-0 right-0 p-1 bg-purple-500/20 rounded-bl-lg">
+            <Sparkles size={10} className="text-purple-400" />
+          </div>
+       )}
+       
+       <div className={`w-5 h-5 rounded-full border flex items-center justify-center
+          ${isSelected ? 'bg-purple-500 border-purple-500' : 'border-slate-600'}`}>
+          {isSelected && <Check size={12} className="text-white" />}
+       </div>
+       <div className="flex-1">
+           <span className={isSelected ? 'text-white' : 'text-slate-400'}>{task.title}</span>
+           {isIcebox && <span className="ml-2 text-[10px] text-cyan-500 border border-cyan-500/30 px-1.5 py-0.5 rounded">Yesterday</span>}
+       </div>
+       
+       {/* Status Tags */}
+       {task.status === TaskStatus.ANCHOR && <span className="text-xs bg-yellow-500/20 text-yellow-500 px-2 py-0.5 rounded ml-auto">Anchor</span>}
+       {isDefender && <span className="text-xs bg-red-500/20 text-red-500 px-2 py-0.5 rounded ml-auto">Defender</span>}
+     </div>
+    )
+  };
+
 
   if (stage === 'input') {
     return (
@@ -486,115 +670,105 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
               </h2>
             </div>
 
+            {/* Toast Notification */}
+            <AnimatePresence>
+                {showToast.visible && (
+                    <motion.div 
+                        initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                        className="absolute bottom-20 left-1/2 -translate-x-1/2 bg-slate-800 border border-purple-500/30 text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-2 z-50"
+                    >
+                        <Sparkles size={14} className="text-purple-400" />
+                        <span className="text-sm font-medium">{showToast.message}</span>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
             {/* Task Options */}
             <div className="flex-1 overflow-y-auto space-y-3 no-scrollbar mb-4">
-               {/* Logic to show correct tasks based on step */}
                {(() => {
-                 let tasksToShow: Task[] = [];
-                 
-                 if (currentStep === FunnelStep.STEP_1_ALIGNMENT) {
-                    // Show all Candidates
-                    tasksToShow = generatedTasks.filter(t => t.status === TaskStatus.CANDIDATE);
-                 } else if (currentStep === FunnelStep.STEP_2_LEVERAGE) {
-                    if (isSubsequentMode) {
-                        // Show Challenger vs Defender
-                        const challenger = generatedTasks.find(t => t.id === funnelScript.q2.suggestedId);
-                        const defender = existingTasks.find(t => t.id === funnelScript.q2.oldDefenderId);
-                        if (challenger) tasksToShow.push(challenger);
-                        // Note: Defender is not in generatedTasks, so we might need to render it specially or mock it here for display
-                        // For simplicity, let's just show the challenger and ask if they want to swap.
-                        // Actually, the UI needs to show both.
-                        // Let's add defender to the list just for display if not present.
-                        if (defender && !tasksToShow.find(t => t.id === defender.id)) tasksToShow.push(defender);
-                    } else {
-                        // Show remaining Candidates
-                        tasksToShow = generatedTasks.filter(t => t.status === TaskStatus.CANDIDATE);
-                    }
-                 } else if (currentStep === FunnelStep.STEP_3_FRICTION) {
-                     // Show remaining Candidates
-                     tasksToShow = generatedTasks.filter(t => t.status === TaskStatus.CANDIDATE);
-                 } else {
-                     // Step 4: Show remaining Candidates
-                     tasksToShow = generatedTasks.filter(t => t.status === TaskStatus.CANDIDATE);
-                 }
-
-                 return tasksToShow.map(task => {
-                   const isSelected = selectedIds.includes(task.id);
-                   // Highlight suggestion logic
-                   let isSuggested = false;
-                   if (currentStep === FunnelStep.STEP_1_ALIGNMENT && task.id === funnelScript.q1.suggestedId) isSuggested = true;
-                   if (currentStep === FunnelStep.STEP_2_LEVERAGE && !isSubsequentMode && task.id === funnelScript.q2.suggestedId) isSuggested = true;
-                   if (currentStep === FunnelStep.STEP_2_LEVERAGE && isSubsequentMode && task.id === funnelScript.q2.suggestedId) isSuggested = true; // Challenger
-                   if (currentStep === FunnelStep.STEP_3_FRICTION && !isSubsequentMode && task.id === funnelScript.q3.suggestedId) isSuggested = true;
-
-                   return (
-                    <div 
-                      key={task.id}
-                      onClick={() => {
-                        // Selection Logic
-                        if (currentStep === FunnelStep.STEP_1_ALIGNMENT) {
-                            // Multi-select for deletion/drawer
-                            setSelectedIds(prev => isSelected ? prev.filter(id => id !== task.id) : [...prev, task.id]);
-                        } else if (currentStep === FunnelStep.STEP_2_LEVERAGE) {
-                            // Single select (Anchor or Swap)
-                            setSelectedIds([task.id]);
-                        } else if (currentStep === FunnelStep.STEP_3_FRICTION) {
-                            // Single select (Icebreaker or Energy)
-                            if (isSelected) setSelectedIds([]);
-                            else setSelectedIds([task.id]);
-                        } else if (currentStep === FunnelStep.STEP_4_SACRIFICE) {
-                             // Single select (Final Anchor)
-                             if (isSelected) setSelectedIds([]);
-                             else setSelectedIds([task.id]);
-                        }
-                      }}
-                      className={`p-4 rounded-xl border transition-all cursor-pointer flex items-center gap-4 relative overflow-hidden
-                        ${isSelected 
-                          ? 'bg-purple-500/20 border-purple-500' 
-                          : 'bg-slate-900 border-slate-800 hover:border-slate-700'}`}
-                    >
-                      {isSuggested && !isSelected && (
-                         <div className="absolute top-0 right-0 p-1 bg-purple-500/20 rounded-bl-lg">
-                           <Sparkles size={10} className="text-purple-400" />
-                         </div>
-                      )}
-                      
-                      <div className={`w-5 h-5 rounded-full border flex items-center justify-center
-                         ${isSelected ? 'bg-purple-500 border-purple-500' : 'border-slate-600'}`}>
-                         {isSelected && <Check size={12} className="text-white" />}
-                      </div>
-                      <span className={isSelected ? 'text-white' : 'text-slate-400'}>{task.title}</span>
-                      {/* Show status tag if it's an existing anchor */}
-                      {task.status === TaskStatus.ANCHOR && <span className="text-xs bg-yellow-500/20 text-yellow-500 px-2 py-0.5 rounded ml-auto">Anchor</span>}
-                    </div>
-                   )
-                 });
+                   const options = getStepOptions(currentStep, generatedTasks, funnelScript);
+                   
+                   // Q4 Split View Logic
+                   if (currentStep === FunnelStep.STEP_4_SACRIFICE && !isSubsequentMode) {
+                       const newOpts = options.filter(t => !t.isFrozen);
+                       const iceboxOpts = options.filter(t => t.isFrozen);
+                       
+                       return (
+                           <div className="space-y-6">
+                               {newOpts.length > 0 && (
+                                   <div>
+                                       <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">New Candidates</h3>
+                                       <div className="space-y-2">
+                                           {newOpts.map(t => renderTaskOption(t))}
+                                       </div>
+                                   </div>
+                               )}
+                               {iceboxOpts.length > 0 && (
+                                   <div>
+                                       <h3 className="text-xs font-bold text-cyan-500/70 uppercase tracking-wider mb-2 flex items-center gap-1">
+                                           <Snowflake size={10} /> Icebox
+                                       </h3>
+                                       <div className="space-y-2">
+                                           {iceboxOpts.map(t => renderTaskOption(t))}
+                                       </div>
+                                   </div>
+                               )}
+                           </div>
+                       );
+                   }
+                   
+                   return options.map(t => renderTaskOption(t));
                })()}
             </div>
 
-            {/* Action Button */}
-            <button
-              onClick={handleStepConfirm}
-              className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg transition-colors bg-white text-black hover:bg-slate-200`}
-            >
-              {currentStep === FunnelStep.STEP_1_ALIGNMENT && "Move Selected to Drawer"}
-              {currentStep === FunnelStep.STEP_2_LEVERAGE && (isSubsequentMode ? "Confirm Swap" : "Confirm Keystone")}
-              {currentStep === FunnelStep.STEP_3_FRICTION && (isSubsequentMode ? "Confirm Challenge" : "Set Icebreaker")}
-              {currentStep === FunnelStep.STEP_4_SACRIFICE && (isSubsequentMode ? "Confirm Lineup" : "Lock Final Anchor")}
-            </button>
-            
-            {currentStep === FunnelStep.STEP_1_ALIGNMENT && (
-                 <button onClick={() => { setSelectedIds([]); handleStepConfirm(); }} className="mt-2 text-xs text-slate-500 py-2">Keep All</button>
-            )}
-            {currentStep === FunnelStep.STEP_2_LEVERAGE && isSubsequentMode && (
-                 <button onClick={() => { setSelectedIds([]); handleStepConfirm(); }} className="mt-2 text-xs text-slate-500 py-2">Keep Original (No Swap)</button>
-            )}
-             {currentStep === FunnelStep.STEP_3_FRICTION && isSubsequentMode && (
-                 <button onClick={() => { setSelectedIds([]); handleStepConfirm(); }} className="mt-2 text-xs text-slate-500 py-2">No, Too Tired</button>
-            )}
-             {currentStep === FunnelStep.STEP_4_SACRIFICE && !isSubsequentMode && (
-                 <button onClick={() => { setSelectedIds([]); handleStepConfirm(); }} className="mt-2 text-xs text-slate-500 py-2">Skip (Enough for today)</button>
-            )}
+            {/* Action Buttons */}
+            <div className="space-y-3">
+                {currentStep === FunnelStep.STEP_1_ALIGNMENT ? (
+                    <div className="flex gap-3">
+                        <button 
+                            onClick={() => {
+                                // Yes: Move suggested task to Drawer
+                                if (funnelScript.q1.suggestedId) {
+                                    handleTaskUpdate(funnelScript.q1.suggestedId, { status: TaskStatus.PENDING });
+                                }
+                                handleStepConfirm();
+                            }}
+                            className="flex-1 py-4 rounded-xl bg-slate-800 text-white font-bold hover:bg-slate-700"
+                        >
+                            Yes, Move to Drawer
+                        </button>
+                        <button 
+                            onClick={() => {
+                                // No: Keep it (do nothing)
+                                handleStepConfirm();
+                            }}
+                            className="flex-1 py-4 rounded-xl bg-white text-black font-bold hover:bg-slate-200"
+                        >
+                            No, Keep it
+                        </button>
+                    </div>
+                ) : (
+                    <button
+                      onClick={handleStepConfirm}
+                      className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg transition-colors bg-white text-black hover:bg-slate-200`}
+                    >
+                      {currentStep === FunnelStep.STEP_2_LEVERAGE && (isSubsequentMode ? "Confirm Swap" : "Confirm Keystone")}
+                      {currentStep === FunnelStep.STEP_3_FRICTION && (isSubsequentMode ? "Confirm Challenge" : "Set Icebreaker")}
+                      {currentStep === FunnelStep.STEP_4_SACRIFICE && (isSubsequentMode ? "Confirm Lineup" : "Lock Final Anchor")}
+                    </button>
+                )}
+
+                {/* Secondary/Skip Actions */}
+                {currentStep === FunnelStep.STEP_2_LEVERAGE && isSubsequentMode && (
+                     <button onClick={() => { setSelectedIds([]); handleStepConfirm(); }} className="w-full text-xs text-slate-500 py-2">Keep Original (No Swap)</button>
+                )}
+                 {currentStep === FunnelStep.STEP_3_FRICTION && isSubsequentMode && (
+                     <button onClick={() => { setSelectedIds([]); handleStepConfirm(); }} className="w-full text-xs text-slate-500 py-2">No, Too Tired</button>
+                )}
+                 {currentStep === FunnelStep.STEP_4_SACRIFICE && !isSubsequentMode && (
+                     <button onClick={() => { setSelectedIds([]); handleStepConfirm(); }} className="w-full text-xs text-slate-500 py-2">Skip (Enough for today)</button>
+                )}
+            </div>
 
           </motion.div>
         )}

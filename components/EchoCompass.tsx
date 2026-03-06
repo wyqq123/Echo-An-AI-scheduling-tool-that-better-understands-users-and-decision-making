@@ -87,12 +87,12 @@ const Tree = ({ category, leaves }: { category: string, leaves: LeafNode[] }) =>
 
 const EchoCompass: React.FC<Props> = ({ tasks, forest }) => {
   // Store Hooks
-  const { focusThemes, setFocusThemes } = useUserStore();
+  const { focusThemes, setFocusThemes, dailyAnchorsCompleted } = useUserStore();
   const [isEditingThemes, setIsEditingThemes] = useState(false);
   const [tempThemes, setTempThemes] = useState<string[]>([]);
 
-  // Calculate completed anchors
-  const completedAnchors = tasks.filter(t => t.isAnchor && t.completed).length;
+  // Use store value for stars
+  const completedAnchors = dailyAnchorsCompleted;
 
   const categories = [TaskCategory.WORK, TaskCategory.STUDY, TaskCategory.GROWTH, TaskCategory.LIFE];
 

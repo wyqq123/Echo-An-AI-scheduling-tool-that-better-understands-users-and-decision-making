@@ -53,6 +53,9 @@ export interface Task {
   status: TaskStatus; 
   isAnchor: boolean; // Computed from status for backward compat
   isFrozen: boolean; // Legacy/Icebox
+  frozenSince?: string; // ISO Date string when it entered icebox
+  isRevived?: boolean; // If it was revived from icebox
+  isArchived?: boolean; // New field for daily reset
   completed: boolean;
   duration: number; // in minutes
   startTime?: string; // HH:MM
@@ -85,7 +88,6 @@ export interface FocusTheme {
 export interface AppState {
   userProfile?: UserProfile;
   onboardingCompleted: boolean;
-  tasks: Task[];
   forest: LeafNode[]; // Task Forest Data
   quarterlyGoal: string;
   activeTab: Tab;
@@ -96,16 +98,10 @@ export interface AppState {
 
 export type Action =
   | { type: 'SET_TAB'; payload: Tab }
-  | { type: 'ADD_TASKS'; payload: Task[] }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'START_DECISION_MATRIX'; payload: Task[] }
   | { type: 'DECIDE_TASK'; payload: { taskId: string; isAnchor: boolean; isFrozen: boolean } }
   | { type: 'FINISH_DECISION_MATRIX' }
-  | { type: 'TOGGLE_TASK'; payload: string }
-  | { type: 'UPDATE_TASK_TIME'; payload: { id: string; startTime: string; dayOffset: number } }
-  | { type: 'UNFREEZE_TASKS' }
-  | { type: 'DELETE_FROZEN_TASKS' }
-  | { type: 'UPDATE_TASKS'; payload: Task[] }
   | { type: 'ADD_LEAF'; payload: LeafNode }
   | { type: 'GROW_LEAF'; payload: { canonicalTitle: string } }
   | { type: 'COMPLETE_ONBOARDING'; payload: UserProfile };

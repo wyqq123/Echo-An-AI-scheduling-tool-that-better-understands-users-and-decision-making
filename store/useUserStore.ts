@@ -1,26 +1,85 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { isSameDay } from 'date-fns';
+import { Task, TaskStatus } from '../types';
 
 interface UserState {
-  // User's focus themes, e.g., ["Career Breakthrough (Core Skills)", "Mental Wilderness (Explore Unknown)"]
+  // User's focus themes
   focusThemes: string[];
-  
-  // Update themes (called by Onboarding or Echo Compass)
   setFocusThemes: (themes: string[]) => void;
-  
-  // Clear themes
   clearFocusThemes: () => void;
+
+  // Task Management & Daily Reset
+  tasks: Task[];
+  lastActiveDate: string;        // Last active date ISO String
+  dailyAnchorsCompleted: number; // Stars lit in Echo Compass
+  
+  setTasks: (tasks: Task[]) => void;
+  checkAndResetDailyState: () => void;
+  incrementDailyAnchors: () => void;
 }
 
 export const useUserStore = create<UserState>()(
   persist(
-    (set) => ({
-      focusThemes: [], // Default empty array
+    (set, get) => ({
+      focusThemes: [],
       setFocusThemes: (themes) => set({ focusThemes: themes }),
       clearFocusThemes: () => set({ focusThemes: [] }),
+
+      tasks: [],
+      lastActiveDate: new Date().toISOString(),
+      dailyAnchorsCompleted: 0,
+
+      setTasks: (tasks) => set({ tasks }),
+
+      incrementDailyAnchors: () => set((state) => ({ dailyAnchorsCompleted: state.dailyAnchorsCompleted + 1 })),
+
+      checkAndResetDailyState: () => {
+        const { lastActiveDate, tasks } = get();
+        const today = new Date();
+        
+        // Check if day changed
+        if (!isSameDay(new Date(lastActiveDate), today)) {
+          console.log("🌅 New day detected, executing reset protocol...");
+
+          const nextTasks = tasks.map(task => {
+            // 1. Completed tasks: Archive them
+            if (task.status === TaskStatus.COMPLETED) {
+              return { ...task, isArchived: true };
+            }
+
+            // 2. Unfinished tasks (PENDING, ANCHOR, ICEBREAKER)
+            // Move to "Icebox", mark as isFrozen, reset status to CANDIDATE
+            if (task.status === TaskStatus.PENDING || 
+                task.status === TaskStatus.ANCHOR || 
+                task.status === TaskStatus.ICEBREAKER) {
+              return { 
+                ...task, 
+                status: TaskStatus.CANDIDATE, 
+                isFrozen: true,  // Enter Icebox
+                frozenSince: task.frozenSince || today.toISOString(), // Set if not already set
+                isAnchor: false, 
+                startTime: undefined 
+              };
+            }
+
+            return task;
+          });
+
+          // 3. Update state
+          set({
+            tasks: nextTasks,
+            dailyAnchorsCompleted: 0,        // Reset stars
+            lastActiveDate: today.toISOString(), // Update last active date
+          });
+        } else {
+            // Even if same day, update last active date to keep it fresh
+            set({ lastActiveDate: today.toISOString() });
+        }
+      },
     }),
     {
-      name: 'echo-user-storage', // Persist to localStorage
+      name: 'echo-user-storage',
     }
   )
 );

@@ -7,10 +7,10 @@ import EchoCompass from './components/EchoCompass';
 import BottomNav from './components/BottomNav';
 import EchoOnboarding from './components/EchoOnboarding';
 import { getCanonicalTaskName } from './services/geminiService';
+import { useUserStore } from './store/useUserStore';
 
 // Initial State
 const initialState: AppState = {
-  tasks: [],
   forest: [], // Initialize empty forest
   quarterlyGoal: "Learn React Native & Get Promoted",
   activeTab: Tab.FUNNEL,
@@ -25,30 +25,6 @@ const reducer = (state: AppState, action: Action): AppState => {
   switch (action.type) {
     case 'SET_TAB':
       return { ...state, activeTab: action.payload };
-    case 'ADD_TASKS':
-      // Merge logic: Remove tasks from state that are present in payload, then add payload
-      const payloadIds = new Set(action.payload.map((t: Task) => t.id));
-      const keptTasks = state.tasks.filter(t => !payloadIds.has(t.id));
-      return { ...state, tasks: [...keptTasks, ...action.payload] };
-    case 'TOGGLE_TASK':
-      return {
-        ...state,
-        tasks: state.tasks.map(t => 
-          t.id === action.payload ? { ...t, completed: !t.completed } : t
-        )
-      };
-    case 'UNFREEZE_TASKS':
-      return {
-        ...state,
-        tasks: state.tasks.map(t => t.isFrozen ? { ...t, isFrozen: false } : t)
-      };
-    case 'DELETE_FROZEN_TASKS':
-      return {
-        ...state,
-        tasks: state.tasks.filter(t => !t.isFrozen)
-      };
-    case 'UPDATE_TASKS':
-      return { ...state, tasks: action.payload };
     
     // Forest Actions
     case 'ADD_LEAF':
@@ -83,26 +59,48 @@ const reducer = (state: AppState, action: Action): AppState => {
 const App: React.FC = () => {
   // Load initial state from localStorage if available
   const savedState = localStorage.getItem('echoAppState');
-  const initial = savedState ? { ...initialState, ...JSON.parse(savedState) } : initialState;
+  // Filter out tasks from savedState if it exists (migration)
+  const parsedSavedState = savedState ? JSON.parse(savedState) : {};
+  if (parsedSavedState.tasks) delete parsedSavedState.tasks;
+  
+  const initial = savedState ? { ...initialState, ...parsedSavedState } : initialState;
 
   const [state, dispatch] = useReducer(reducer, initial);
 
-  // Persist state changes
+  // Store Hooks
+  const { tasks, setTasks, checkAndResetDailyState, incrementDailyAnchors } = useUserStore();
+
+  // Daily Reset Effect
+  useEffect(() => {
+    // 1. Check on mount
+    checkAndResetDailyState();
+
+    // 2. Check every minute
+    const interval = setInterval(() => {
+      checkAndResetDailyState();
+    }, 60000);
+
+    // 3. Check on focus
+    const handleFocus = () => checkAndResetDailyState();
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [checkAndResetDailyState]);
+
+  // Persist state changes (excluding tasks which are in Zustand)
   useEffect(() => {
     localStorage.setItem('echoAppState', JSON.stringify({
       onboardingCompleted: state.onboardingCompleted,
       userProfile: state.userProfile,
-      forest: state.forest,
-      tasks: state.tasks
+      forest: state.forest
     }));
-  }, [state.onboardingCompleted, state.userProfile, state.forest, state.tasks]);
+  }, [state.onboardingCompleted, state.userProfile, state.forest]);
 
   // Helper: Process new tasks for the Forest
   const processNewForestTasks = async (newTasks: Task[]) => {
-    // We access the *current* forest from state in the reducer if we were inside, 
-    // but here in the component we rely on the closure or state passed to render.
-    // Ideally we pass current forest to the service.
-    
     for (const task of newTasks) {
       // Semantic check
       const canonicalName = await getCanonicalTaskName(task.title, state.forest);
@@ -121,16 +119,20 @@ const App: React.FC = () => {
         };
         dispatch({ type: 'ADD_LEAF', payload: newLeaf });
       }
-      // Note: If leaf exists, we do nothing until completion.
     }
   };
 
-  const handleTasksGenerated = (tasks: Task[]) => {
-    dispatch({ type: 'ADD_TASKS', payload: tasks });
+  const handleTasksGenerated = (newTasks: Task[]) => {
+    // Merge logic: Remove tasks from state that are present in payload, then add payload
+    const payloadIds = new Set(newTasks.map((t: Task) => t.id));
+    const keptTasks = tasks.filter(t => !payloadIds.has(t.id));
+    const updatedTasks = [...keptTasks, ...newTasks];
+    
+    setTasks(updatedTasks);
     dispatch({ type: 'SET_TAB', payload: Tab.TIMELINE });
     
     // Process for Forest
-    processNewForestTasks(tasks);
+    processNewForestTasks(newTasks);
   };
 
   const handleTabChange = (tab: Tab) => {
@@ -138,17 +140,19 @@ const App: React.FC = () => {
   };
 
   const handleToggleTask = async (id: string) => {
-    const task = state.tasks.find(t => t.id === id);
-    const wasCompleted = task?.completed;
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
     
-    dispatch({ type: 'TOGGLE_TASK', payload: id });
+    const wasCompleted = task.completed;
+    const updatedTasks = tasks.map(t => 
+      t.id === id ? { ...t, completed: !t.completed } : t
+    );
+    
+    setTasks(updatedTasks);
 
     // If we just completed it (was false, now true)
-    if (task && !wasCompleted) {
-       // Find which leaf this belongs to via AI or simple title match
-       // For better UX responsiveness, we assume title match first, but we should use the canonical logic ideally.
-       // Here we re-verify canonical name to be safe or just match string if simplistic.
-       // Let's use the service to find the canonical match based on the title.
+    if (!wasCompleted) {
+       incrementDailyAnchors(); // Increment stars in store
        const canonicalName = await getCanonicalTaskName(task.title, state.forest);
        dispatch({ type: 'GROW_LEAF', payload: { canonicalTitle: canonicalName } });
     }
@@ -156,9 +160,9 @@ const App: React.FC = () => {
 
   const handleUpdateTasks = (updatedTasks: Task[]) => {
     // Detect new tasks created manually in Timeline
-    const newTasks = updatedTasks.filter(u => !state.tasks.find(existing => existing.id === u.id));
+    const newTasks = updatedTasks.filter(u => !tasks.find(existing => existing.id === u.id));
     
-    dispatch({ type: 'UPDATE_TASKS', payload: updatedTasks });
+    setTasks(updatedTasks);
     
     if (newTasks.length > 0) {
       processNewForestTasks(newTasks);
@@ -169,19 +173,21 @@ const App: React.FC = () => {
     dispatch({ type: 'COMPLETE_ONBOARDING', payload: profile });
   };
 
+  const visibleTasks = tasks.filter(t => !t.isArchived);
+
   const renderContent = () => {
     switch (state.activeTab) {
       case Tab.FUNNEL:
         return (
           <FocusFunnel 
             onTasksGenerated={handleTasksGenerated} 
-            existingTasks={state.tasks}
+            existingTasks={visibleTasks}
           />
         );
       case Tab.TIMELINE:
         return (
           <FluidTimeline 
-            tasks={state.tasks} 
+            tasks={visibleTasks} 
             onToggleTask={handleToggleTask} 
             onUpdateTasks={handleUpdateTasks} 
           />
@@ -189,12 +195,12 @@ const App: React.FC = () => {
       case Tab.PODS:
         return <CommutePod />;
       case Tab.COMPASS:
-        return <EchoCompass tasks={state.tasks} forest={state.forest} />;
+        return <EchoCompass tasks={visibleTasks} forest={state.forest} />;
       default:
         return (
           <FocusFunnel 
             onTasksGenerated={handleTasksGenerated} 
-            existingTasks={state.tasks}
+            existingTasks={visibleTasks}
           />
         );
     }
