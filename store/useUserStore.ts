@@ -1,22 +1,24 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { isSameDay } from 'date-fns';
-import { Task, TaskStatus } from '../types';
+import { Task, TaskStatus, FocusTheme } from '../types';
 
 interface UserState {
   // User's focus themes
-  focusThemes: string[];
-  setFocusThemes: (themes: string[]) => void;
+  focusThemes: FocusTheme[];
+  setFocusThemes: (themes: FocusTheme[]) => void;
   clearFocusThemes: () => void;
 
   // Task Management & Daily Reset
   tasks: Task[];
   lastActiveDate: string;        // Last active date ISO String
   dailyAnchorsCompleted: number; // Stars lit in Echo Compass
+  dailyCommuteStats: { production: number; growth: number; recovery: number }; // Seconds spent in each pod type
   
   setTasks: (tasks: Task[]) => void;
   checkAndResetDailyState: () => void;
   incrementDailyAnchors: () => void;
+  updateCommuteStats: (type: 'production' | 'growth' | 'recovery', seconds: number) => void;
 }
 
 export const useUserStore = create<UserState>()(
@@ -29,10 +31,18 @@ export const useUserStore = create<UserState>()(
       tasks: [],
       lastActiveDate: new Date().toISOString(),
       dailyAnchorsCompleted: 0,
+      dailyCommuteStats: { production: 0, growth: 0, recovery: 0 },
 
       setTasks: (tasks) => set({ tasks }),
 
       incrementDailyAnchors: () => set((state) => ({ dailyAnchorsCompleted: state.dailyAnchorsCompleted + 1 })),
+
+      updateCommuteStats: (type, seconds) => set((state) => ({
+        dailyCommuteStats: {
+          ...state.dailyCommuteStats,
+          [type]: state.dailyCommuteStats[type] + seconds
+        }
+      })),
 
       checkAndResetDailyState: () => {
         const { lastActiveDate, tasks } = get();
@@ -70,6 +80,7 @@ export const useUserStore = create<UserState>()(
           set({
             tasks: nextTasks,
             dailyAnchorsCompleted: 0,        // Reset stars
+            dailyCommuteStats: { production: 0, growth: 0, recovery: 0 }, // Reset commute stats
             lastActiveDate: today.toISOString(), // Update last active date
           });
         } else {

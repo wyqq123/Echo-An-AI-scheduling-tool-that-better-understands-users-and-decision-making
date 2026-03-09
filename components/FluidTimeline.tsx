@@ -1,9 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Task, TaskCategory, TaskStatus } from '../types';
+import { Task, TaskCategory, TaskStatus, TaskIntent } from '../types';
 import { 
   Plus, Snowflake, Trash2, RefreshCw, MapPin, X, GripHorizontal, 
-  ChevronLeft, ChevronRight, Check, Star, Save
+  ChevronLeft, ChevronRight, Check, Star, Save, Edit2, Tag, AlignLeft, Sparkles, FileText
 } from 'lucide-react';
 import { format, addDays, isSameDay } from 'date-fns';
 import confetti from 'canvas-confetti';
@@ -19,6 +19,15 @@ const HOUR_HEIGHT = 60;
 const SNAP_MINUTES = 15;
 const MINUTE_HEIGHT = HOUR_HEIGHT / 60;
 const HEADER_HEIGHT = 40; // Height of the sticky day header (h-10)
+
+const INTENT_CONFIG = [
+  { type: TaskIntent.BODY_MIND, color: 'bg-green-500/20 text-green-400 border-green-500/40' },
+  { type: TaskIntent.CAREER_BREAK, color: 'bg-purple-500/20 text-purple-400 border-purple-500/40' },
+  { type: TaskIntent.ACADEMIC_SPRINT, color: 'bg-blue-500/20 text-blue-400 border-blue-500/40' },
+  { type: TaskIntent.DEEP_CONNECT, color: 'bg-red-500/20 text-red-400 border-red-500/40' },
+  { type: TaskIntent.WEALTH_CONTROL, color: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40' },
+  { type: TaskIntent.INNER_WILD, color: 'bg-orange-500/20 text-orange-400 border-orange-500/40' },
+];
 
 // Convert time string "09:30" to minutes from 00:00
 const timeToMinutes = (time: string | undefined): number => {
@@ -560,81 +569,108 @@ const FluidTimeline: React.FC<Props> = ({ tasks, onToggleTask, onUpdateTasks }) 
 
       {/* --- Modal --- */}
       {isModalOpen && editingTask && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in fade-in duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl"
+          >
             {/* Header */}
-            <div className="px-6 py-4 bg-gray-50 border-b flex justify-between items-center">
-              <h3 className="font-bold text-gray-700">
-                {editingTask.id.startsWith('temp') ? '✨ New Task' : '📝 Edit Task'}
+            <div className="p-6 border-b border-slate-800 flex justify-between items-center">
+              <h3 className="text-white font-bold flex items-center gap-2">
+                <Edit2 size={18} className="text-purple-400" /> 
+                {editingTask.id.startsWith('temp') ? 'New Task' : 'Edit Task'}
               </h3>
-              <button onClick={() => setIsModalOpen(false)} className="text-gray-400 hover:text-gray-600">
-                <X size={20} />
+              <button onClick={() => setIsModalOpen(false)} className="p-2 hover:bg-slate-800 rounded-full transition-colors">
+                <X size={20} className="text-slate-400" />
               </button>
             </div>
-            
-            {/* Body */}
-            <div className="p-6 space-y-4">
-              <div>
-                <label className="text-xs font-bold text-gray-400 uppercase">Title</label>
+
+            <div className="p-6 space-y-6">
+              {/* Title Input */}
+              <div className="space-y-2">
+                <label className="text-xs text-slate-500 uppercase font-semibold">Task Name</label>
                 <input 
                   autoFocus
-                  className="w-full bg-gray-100 border-none rounded-xl px-4 py-3 text-gray-900 focus:ring-2 focus:ring-indigo-500 mt-1"
-                  placeholder="What needs to be done?"
                   value={editingTask.title}
                   onChange={(e) => setEditingTask({...editingTask, title: e.target.value})}
+                  className="w-full bg-slate-800 border-none rounded-xl p-4 text-white focus:ring-2 focus:ring-purple-500 outline-none"
+                  placeholder="What needs to be done?"
                 />
               </div>
-              
+
+              {/* Time & Duration */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs font-bold text-gray-400 uppercase">Start</label>
+                  <label className="text-xs text-slate-500 uppercase font-semibold">Start Time</label>
                   <input 
                     type="time"
-                    className="w-full bg-gray-100 border-none rounded-xl px-4 py-2 text-gray-900 focus:ring-2 focus:ring-indigo-500 mt-1"
+                    className="w-full bg-slate-800 border-none rounded-xl p-4 text-white focus:ring-2 focus:ring-purple-500 outline-none mt-2"
                     value={editingTask.startTime || ''}
                     onChange={(e) => setEditingTask({...editingTask, startTime: e.target.value})}
                   />
                 </div>
                 <div>
-                   <label className="text-xs font-bold text-gray-400 uppercase">Duration (m)</label>
+                   <label className="text-xs text-slate-500 uppercase font-semibold">Duration (m)</label>
                    <input 
                     type="number"
                     step="15"
-                    className="w-full bg-gray-100 border-none rounded-xl px-4 py-2 text-gray-900 focus:ring-2 focus:ring-indigo-500 mt-1"
+                    className="w-full bg-slate-800 border-none rounded-xl p-4 text-white focus:ring-2 focus:ring-purple-500 outline-none mt-2"
                     value={editingTask.duration}
                     onChange={(e) => setEditingTask({...editingTask, duration: parseInt(e.target.value) || 0})}
                   />
                 </div>
               </div>
 
-              <div>
-                <label className="text-xs font-bold text-gray-400 uppercase">Category</label>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {Object.values(TaskCategory).map(cat => (
+              {/* Intent Selector */}
+              <div className="space-y-2">
+                <label className="text-xs text-slate-500 uppercase font-semibold flex items-center gap-2">
+                  <Tag size={14} /> Core Intent
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  {INTENT_CONFIG.map((config) => (
                     <button
-                      key={cat}
-                      onClick={() => setEditingTask({...editingTask, category: cat})}
-                      className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-colors ${
-                        editingTask.category === cat 
-                          ? 'bg-indigo-600 border-indigo-500 text-white shadow-md' 
-                          : 'bg-white border-gray-200 text-gray-500 hover:border-indigo-300'
-                      }`}
+                      key={config.type}
+                      onClick={() => setEditingTask({...editingTask, intent: config.type})}
+                      className={`py-3 px-4 rounded-xl border text-sm transition-all flex items-center justify-center gap-2
+                        ${editingTask.intent === config.type ? config.color : 'bg-slate-800 border-transparent text-slate-400'}
+                      `}
                     >
-                      {cat}
+                      {config.type}
                     </button>
                   ))}
                 </div>
               </div>
 
+              {/* Note Section (AI-Synced Content) */}
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs text-slate-500 uppercase font-semibold flex items-center gap-2">
+                    <AlignLeft size={14} /> Notes & Workflow
+                  </label>
+                  {editingTask.workflowNote && (
+                    <span className="text-[10px] text-purple-500 flex items-center gap-1">
+                      <Sparkles size={10} /> AI Synced
+                    </span>
+                  )}
+                </div>
+                <textarea 
+                  value={editingTask.workflowNote || ''}
+                  onChange={(e) => setEditingTask({...editingTask, workflowNote: e.target.value})}
+                  rows={6}
+                  placeholder="Add specific steps or notes..."
+                  className="w-full bg-slate-800 border-none rounded-2xl p-4 text-slate-300 text-sm leading-relaxed focus:ring-2 focus:ring-purple-500 outline-none resize-none"
+                />
+              </div>
+
               {/* Priority Decision */}
               <div>
-                <label className="text-xs font-bold text-gray-400 uppercase">Priority Decision</label>
                 <button
                   onClick={() => setEditingTask({ ...editingTask, isAnchor: !editingTask.isAnchor })}
                   className={`w-full mt-2 flex items-center justify-center gap-2 py-3 rounded-xl border-2 transition-all duration-300
                     ${editingTask.isAnchor 
-                      ? 'border-amber-400 bg-amber-50 text-amber-700 shadow-md scale-[1.02]' 
-                      : 'border-slate-100 bg-slate-50 text-slate-400 hover:border-slate-200'}
+                      ? 'border-amber-400 bg-amber-500/10 text-amber-400 shadow-md scale-[1.02]' 
+                      : 'border-slate-800 bg-slate-800 text-slate-400 hover:border-slate-700'}
                   `}
                 >
                   <Star 
@@ -645,31 +681,29 @@ const FluidTimeline: React.FC<Props> = ({ tasks, onToggleTask, onUpdateTasks }) 
                     {editingTask.isAnchor ? 'Marked as Core Anchor' : 'Mark as Core Anchor'}
                   </span>
                 </button>
-                <p className="mt-2 text-[10px] text-slate-400 text-center">
-                  Hint: Core anchors count towards Echo Compass stats.
-                </p>
               </div>
             </div>
 
             {/* Footer */}
-            <div className="px-6 py-4 bg-gray-50 flex gap-3">
+            <div className="p-6 bg-slate-800/50 flex gap-3">
               {!editingTask.id.startsWith('temp') && (
                  <button 
                   onClick={handleDelete}
-                  className="flex items-center justify-center gap-2 px-4 py-2 bg-red-50 text-red-500 rounded-xl hover:bg-red-100 transition-colors mr-auto"
+                  className="flex items-center justify-center gap-2 px-4 py-3 bg-red-500/10 text-red-500 rounded-xl hover:bg-red-500/20 transition-colors mr-auto"
                 >
                   <Trash2 size={18} />
                 </button>
               )}
               
+              <button onClick={() => setIsModalOpen(false)} className="flex-1 py-3 text-slate-400 font-medium hover:text-white transition-colors">Cancel</button>
               <button 
                 onClick={saveTask}
-                className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-lg shadow-indigo-200 transition-all flex items-center justify-center gap-2"
+                className="flex-1 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-purple-900/20 flex items-center justify-center gap-2"
               >
-                <Save size={18} /> Save
+                <Save size={18} /> Save Changes
               </button>
             </div>
-          </div>
+          </motion.div>
         </div>
       )}
 
@@ -752,6 +786,7 @@ const FluidTaskCard: React.FC<CardProps> = ({ task, onToggle, onMouseDown, onCon
             <div className={`flex items-center gap-2 mt-0.5 ${task.completed ? 'opacity-50' : 'opacity-80'}`}>
               <span className="text-[9px] font-mono text-white/80">{task.startTime}</span>
               <span className="text-[9px] px-1 rounded bg-black/20 text-white/80">{task.duration}m</span>
+              {task.workflowNote && <FileText size={9} className="text-white/70" />}
             </div>
          </div>
       </div>

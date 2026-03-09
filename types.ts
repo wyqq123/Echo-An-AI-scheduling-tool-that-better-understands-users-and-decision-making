@@ -80,9 +80,9 @@ export interface UserProfile {
 
 export interface FocusTheme {
   id: string;
-  title: string;
-  focusArea: string; // The specific refined focus
-  icon: string;
+  intent: TaskIntent; // Enum
+  tags: string[];
+  isPrimary: boolean;
 }
 
 export interface AppState {

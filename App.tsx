@@ -5,6 +5,7 @@ import FluidTimeline from './components/FluidTimeline';
 import CommutePod from './components/CommutePod';
 import EchoCompass from './components/EchoCompass';
 import BottomNav from './components/BottomNav';
+import Sidebar from './components/Sidebar';
 import EchoOnboarding from './components/EchoOnboarding';
 import { getCanonicalTaskName } from './services/geminiService';
 import { useUserStore } from './store/useUserStore';
@@ -68,7 +69,7 @@ const App: React.FC = () => {
   const [state, dispatch] = useReducer(reducer, initial);
 
   // Store Hooks
-  const { tasks, setTasks, checkAndResetDailyState, incrementDailyAnchors } = useUserStore();
+  const { tasks, setTasks, checkAndResetDailyState, incrementDailyAnchors, focusThemes, setFocusThemes } = useUserStore();
 
   // Daily Reset Effect
   useEffect(() => {
@@ -195,7 +196,7 @@ const App: React.FC = () => {
       case Tab.PODS:
         return <CommutePod />;
       case Tab.COMPASS:
-        return <EchoCompass tasks={visibleTasks} forest={state.forest} />;
+        return <EchoCompass themes={focusThemes} onUpdateThemes={setFocusThemes} />;
       default:
         return (
           <FocusFunnel 
@@ -211,23 +212,26 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="h-screen w-full flex items-center justify-center bg-black">
-      {/* Mobile container wrapper */}
-      <div className="w-full max-w-md h-full max-h-[900px] bg-slate-900 relative shadow-2xl overflow-hidden flex flex-col sm:rounded-[3rem] sm:border-[8px] sm:border-slate-800">
-        
-        {/* Main Content Area */}
-        <main className="flex-1 overflow-hidden relative">
-          {renderContent()}
-        </main>
-
-        {/* Bottom Navigation */}
-        <BottomNav activeTab={state.activeTab} onTabChange={handleTabChange} />
-        
-        {/* iOS Home Indicator simulated */}
-        <div className="h-1 bg-transparent w-full absolute bottom-1 flex justify-center pointer-events-none">
-          <div className="w-1/3 h-1 bg-slate-700/50 rounded-full mb-1" />
-        </div>
+    <div className="flex h-screen w-full bg-black text-white overflow-hidden">
+      {/* Desktop Sidebar */}
+      <div className="hidden md:block h-full">
+        <Sidebar activeTab={state.activeTab} onTabChange={handleTabChange} />
       </div>
+
+      {/* Main Content Area */}
+      <main className="flex-1 flex flex-col h-full relative overflow-hidden">
+        <div className="flex-1 overflow-hidden w-full h-full relative">
+          {/* Content Wrapper for max-width on large screens if desired, or full width */}
+          <div className="w-full h-full max-w-7xl mx-auto">
+             {renderContent()}
+          </div>
+        </div>
+
+        {/* Mobile Bottom Navigation */}
+        <div className="md:hidden absolute bottom-0 left-0 right-0 z-50">
+          <BottomNav activeTab={state.activeTab} onTabChange={handleTabChange} />
+        </div>
+      </main>
     </div>
   );
 };

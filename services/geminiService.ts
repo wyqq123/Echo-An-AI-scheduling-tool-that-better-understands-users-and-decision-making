@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { Task, TaskCategory, FunnelStep, TaskStatus, LeafNode, TaskIntent } from "../types";
+import { Task, TaskCategory, FunnelStep, TaskStatus, LeafNode, TaskIntent, FocusTheme } from "../types";
 
 // Initialize Gemini
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -11,7 +11,7 @@ export interface FunnelScript {
   q4: { question: string; isStale?: boolean };
 }
 
-export const parseBrainDump = async (text: string, focusThemes: string[] = [], iceboxTasks: Task[] = []): Promise<Partial<Task>[]> => {
+export const parseBrainDump = async (text: string, focusThemes: FocusTheme[] = [], iceboxTasks: Task[] = []): Promise<Partial<Task>[]> => {
   if (!process.env.API_KEY) {
     console.warn("No API Key provided, returning mock data");
     return mockParse(text);
@@ -23,10 +23,12 @@ export const parseBrainDump = async (text: string, focusThemes: string[] = [], i
       ? `Existing Icebox Tasks (Frozen): ${JSON.stringify(iceboxTasks.map(t => ({ id: t.id, title: t.title, intent: t.intent })))}` 
       : "No Icebox Tasks.";
 
+    const themeString = focusThemes.map(t => `${t.intent} (${t.tags.join(', ')})`).join("; ");
+
     const prompt = `
       You are an AI assistant for a productivity app called "Echo".
       User Input: "${text}"
-      Current Focus Themes: ${focusThemes.join(", ")}
+      Current Focus Themes: ${themeString}
       ${iceboxContext}
 
       Instructions:
@@ -87,11 +89,28 @@ export const parseBrainDump = async (text: string, focusThemes: string[] = [], i
 
 // ... mapIntentToCategory ...
 
+const mapIntentToCategory = (intent: TaskIntent): TaskCategory => {
+  switch (intent) {
+    case TaskIntent.CAREER_BREAK:
+    case TaskIntent.WEALTH_CONTROL:
+      return TaskCategory.WORK;
+    case TaskIntent.ACADEMIC_SPRINT:
+      return TaskCategory.STUDY;
+    case TaskIntent.INNER_WILD:
+      return TaskCategory.GROWTH;
+    case TaskIntent.BODY_MIND:
+    case TaskIntent.DEEP_CONNECT:
+    default:
+      return TaskCategory.LIFE;
+  }
+};
+
+
 export const generateFunnelScript = async (
   isSubsequent: boolean,
   candidateTasks: Task[],
   existingAnchors: Task[],
-  focusThemes: string[],
+  focusThemes: FocusTheme[],
   currentTime: string,
   iceboxTasks: Task[] = []
 ): Promise<FunnelScript> => {
@@ -111,7 +130,7 @@ export const generateFunnelScript = async (
   const hasThemes = focusThemes.length > 0;
 
   if (hasThemes) {
-    const themeString = focusThemes.map(t => `【${t}】`).join('、');
+    const themeString = focusThemes.map(t => `【${t.intent}: ${t.tags.join(', ')}】`).join('; ');
     themeContext = `Current user's quarterly focus themes are: ${themeString}.`;
     fallbackInstruction = `When evaluating task value, strictly refer to the above focus themes.`;
   } else {
@@ -318,6 +337,44 @@ export const getCanonicalTaskName = async (newTaskTitle: string, existingLeaves:
   }
 };
 
+
+export const generateFocusTags = async (intent: TaskIntent, recentTasks: Task[]): Promise<string[]> => {
+  if (!process.env.API_KEY) return [];
+
+  try {
+    const taskContext = recentTasks.length > 0 
+      ? `Recent User Tasks: ${recentTasks.map(t => t.title).join(', ')}` 
+      : "No recent tasks available.";
+
+    const prompt = `
+      You are an AI assistant helping a user define their quarterly focus themes.
+      The user has selected the broad category: "${intent}".
+      ${taskContext}
+
+      Based on the user's recent tasks (if any) and the chosen category, generate exactly 3 specific, actionable, and concise focus directions (tags) for this quarter.
+      Each tag should be 2-5 words long.
+      Return the result as a JSON array of 3 strings.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING }
+        }
+      }
+    });
+
+    const tags = JSON.parse(response.text || "[]");
+    return Array.isArray(tags) && tags.length === 3 ? tags : [];
+  } catch (error) {
+    console.error("Gemini API Error:", error);
+    return [];
+  }
+};
 
 const mockParse = (text: string): Partial<Task>[] => {
   const parts = text.split(/,|\n/).filter(s => s.trim().length > 0);

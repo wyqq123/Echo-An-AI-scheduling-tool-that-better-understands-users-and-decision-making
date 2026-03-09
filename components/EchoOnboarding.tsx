@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronRight, Sparkles, User, ArrowRight, Check } from 'lucide-react';
-import { UserProfile, FocusTheme } from '../types';
+import { UserProfile, FocusTheme, TaskIntent } from '../types';
 import { useUserStore } from '../store/useUserStore';
 
 // ==========================================
@@ -50,15 +50,14 @@ export default function EchoOnboarding({ onComplete }: EchoOnboardingProps) {
       const d = DOMAINS.find(x => x.id === id)!;
       return {
         id: d.id,
-        title: d.title,
-        focusArea: refinedFocus[id] || d.options[0],
-        icon: d.icon
+        intent: d.title as TaskIntent,
+        tags: [refinedFocus[id] || d.options[0]],
+        isPrimary: false
       };
     });
 
     // Write to Global Store
-    const themeStrings = themes.map(t => `${t.title} (${t.focusArea})`);
-    setFocusThemes(themeStrings);
+    setFocusThemes(themes);
 
     const profile: UserProfile = {
       name,

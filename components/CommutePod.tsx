@@ -2,23 +2,33 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Play, Pause, X, BatteryCharging, Leaf, Gamepad2 } from 'lucide-react';
 import { PodType } from '../types';
+import { useUserStore } from '../store/useUserStore';
 
 const CommutePod: React.FC = () => {
   const [activePod, setActivePod] = useState<PodType | null>(null);
   const [timeLeft, setTimeLeft] = useState(900); // 15 mins default
   const [isRunning, setIsRunning] = useState(false);
+  const { updateCommuteStats } = useUserStore();
 
   useEffect(() => {
     let interval: any;
     if (isRunning && timeLeft > 0) {
       interval = setInterval(() => {
-        setTimeLeft((prev) => prev - 1);
+        setTimeLeft((prev) => {
+          if (prev <= 1) {
+            // Timer finished
+            setIsRunning(false);
+            if (activePod) {
+               updateCommuteStats(activePod as 'production' | 'growth' | 'recovery', 900); // Add full session
+            }
+            return 0;
+          }
+          return prev - 1;
+        });
       }, 1000);
-    } else if (timeLeft === 0) {
-      setIsRunning(false);
     }
     return () => clearInterval(interval);
-  }, [isRunning, timeLeft]);
+  }, [isRunning, timeLeft, activePod, updateCommuteStats]);
 
   const startPod = (type: PodType) => {
     setActivePod(type);
@@ -27,6 +37,14 @@ const CommutePod: React.FC = () => {
   };
 
   const closePod = () => {
+    // If closing early, save progress? 
+    // For now, let's only save on completion or maybe save partial?
+    // Let's save partial progress on close for better accuracy
+    if (activePod && timeLeft < 900) {
+        const elapsed = 900 - timeLeft;
+        updateCommuteStats(activePod as 'production' | 'growth' | 'recovery', elapsed);
+    }
+
     setIsRunning(false);
     setActivePod(null);
   };
