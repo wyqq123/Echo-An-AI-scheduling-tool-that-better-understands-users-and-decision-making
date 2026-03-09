@@ -35,14 +35,17 @@ export const useUserStore = create<UserState>()(
 
       setTasks: (tasks) => set({ tasks }),
 
-      incrementDailyAnchors: () => set((state) => ({ dailyAnchorsCompleted: state.dailyAnchorsCompleted + 1 })),
+      incrementDailyAnchors: () => set((state) => ({ dailyAnchorsCompleted: (state.dailyAnchorsCompleted || 0) + 1 })),
 
-      updateCommuteStats: (type, seconds) => set((state) => ({
-        dailyCommuteStats: {
-          ...state.dailyCommuteStats,
-          [type]: state.dailyCommuteStats[type] + seconds
-        }
-      })),
+      updateCommuteStats: (type, seconds) => set((state) => {
+        const currentStats = state.dailyCommuteStats || { production: 0, growth: 0, recovery: 0 };
+        return {
+          dailyCommuteStats: {
+            ...currentStats,
+            [type]: (currentStats[type] || 0) + seconds
+          }
+        };
+      }),
 
       checkAndResetDailyState: () => {
         const { lastActiveDate, tasks } = get();

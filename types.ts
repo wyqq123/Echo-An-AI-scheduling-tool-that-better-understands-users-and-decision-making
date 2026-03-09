@@ -70,6 +70,23 @@ export interface LeafNode {
   count: number;          // Completion count
   category: TaskCategory;
   level: number;          // Visual growth level
+  isFruit?: boolean;      // Whether it has evolved into a fruit
+  intent?: TaskIntent;    // Which intent tree it belongs to
+  completedTasks?: { taskId: string, completedAt: string }[]; // Track completed tasks and their dates
+}
+
+export interface TreeData {
+  intent: TaskIntent | string;
+  color: string;
+  leaves: LeafNode[];
+  totalTasks: number;
+}
+
+export interface SynergyLink {
+  id: string;
+  sourceLeafId: string;
+  targetIntent: string;
+  note?: string;
 }
 
 export interface UserProfile {
@@ -89,6 +106,7 @@ export interface AppState {
   userProfile?: UserProfile;
   onboardingCompleted: boolean;
   forest: LeafNode[]; // Task Forest Data
+  synergyLinks: SynergyLink[]; // Cross-tree links
   quarterlyGoal: string;
   activeTab: Tab;
   loading: boolean;
@@ -103,5 +121,6 @@ export type Action =
   | { type: 'DECIDE_TASK'; payload: { taskId: string; isAnchor: boolean; isFrozen: boolean } }
   | { type: 'FINISH_DECISION_MATRIX' }
   | { type: 'ADD_LEAF'; payload: LeafNode }
-  | { type: 'GROW_LEAF'; payload: { canonicalTitle: string } }
+  | { type: 'GROW_LEAF'; payload: { id: string; taskId: string; completedAt: string } }
+  | { type: 'ADD_SYNERGY_LINK'; payload: SynergyLink }
   | { type: 'COMPLETE_ONBOARDING'; payload: UserProfile };

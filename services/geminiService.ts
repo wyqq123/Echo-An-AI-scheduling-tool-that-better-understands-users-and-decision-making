@@ -303,25 +303,112 @@ const mockFunnelScript = (isSubsequent: boolean, candidates: Task[], anchors: Ta
  * Semantic Normalization for Task Forest
  * Checks if a new task belongs to an existing leaf or needs a new one.
  */
-export const getCanonicalTaskName = async (newTaskTitle: string, existingLeaves: LeafNode[]): Promise<string> => {
-  if (!process.env.API_KEY || existingLeaves.length === 0) {
-    return newTaskTitle; // Fallback or cold start
+export const semanticLeafMerge = async (
+  completedTaskTitle: string,
+  currentIntent: TaskIntent | undefined,
+  existingLeaves: LeafNode[],
+  focusThemes: FocusTheme[]
+): Promise<{ action: 'MERGE' | 'CREATE'; targetLeafId?: string; canonicalTitle?: string }> => {
+  if (!process.env.API_KEY) {
+    return { action: 'CREATE', canonicalTitle: completedTaskTitle.substring(0, 4) };
   }
 
   try {
-    const existingTitles = existingLeaves.map(l => l.canonicalTitle).join(", ");
+    const existingLeafData = existingLeaves
+      .filter(l => l.intent === currentIntent)
+      .map(l => ({ id: l.id, title: l.canonicalTitle }));
+      
+    const existingLeafJson = JSON.stringify(existingLeafData);
+    const themesString = focusThemes.map(t => `${t.intent}: ${t.tags.join(', ')}`).join('; ');
+
     const prompt = `
-      You are a task management expert organizing a "Task Forest".
-      
-      Existing Leaf Nodes: [${existingTitles}]
-      New Task: "${newTaskTitle}"
-      
-      Instructions:
-      1. Determine if the New Task's core intent is highly similar to any Existing Leaf Node.
-         (e.g., "Design AI UI" == "Design AI Interface" -> "AI Design")
-      2. If highly similar, return the EXACT existing Leaf Node name.
-      3. If it is a new concept, return a concise, normalized name (2-5 words max).
-      4. Return ONLY the string name. No JSON, no punctuation.
+# Role
+你是一位精通语义分析与个人效能管理的“森林园丁”。你的任务是接收用户完成的新任务，并决定它是该合并到现有的“任务叶片”中，还是作为一个新叶片生长。
+
+### Input
+- 现有叶子节点列表: ${existingLeafJson}
+- 新完成任务标题: "${completedTaskTitle}"
+- 所属意图类别: ${currentIntent || '未分类'}
+
+# Rules
+- 合并判定：如果新任务是现有叶片的【子步骤】、【不同阶段】（如：初稿与定稿）或【语义近义词】，则执行 MERGE。
+- 区分判定：如果任务属于同一项目但性质完全不同（如：写代码与招募测试员），则执行 CREATE。
+- 命名规范：对于 CREATE，生成一个 2-4 字的、抽象且具有美感的“叶片名称”。
+- 输出 JSON:
+   {
+     "action": "MERGE" | "CREATE",
+     "targetLeafId": "string (如果是MERGE)",
+     "canonicalTitle": "string (如果是CREATE，提供一个2-4字的精简名称)"
+   }
+
+# Intent Context
+用户当前聚焦的 3 大意图：${themesString}
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            action: { type: Type.STRING, enum: ["MERGE", "CREATE"] },
+            targetLeafId: { type: Type.STRING },
+            canonicalTitle: { type: Type.STRING }
+          },
+          required: ["action"]
+        }
+      }
+    });
+
+    const result = JSON.parse(response.text || "{}");
+    return {
+      action: result.action || 'CREATE',
+      targetLeafId: result.targetLeafId,
+      canonicalTitle: result.canonicalTitle || completedTaskTitle.substring(0, 4)
+    };
+
+  } catch (error) {
+    console.error("AI Semantic Merge Error:", error);
+    return { action: 'CREATE', canonicalTitle: completedTaskTitle.substring(0, 4) };
+  }
+};
+
+
+export const generateQuarterlyReview = async (
+  forest: LeafNode[],
+  synergyLinks: SynergyLink[],
+  focusThemes: FocusTheme[]
+): Promise<string> => {
+  if (!process.env.API_KEY) {
+    return "本季度你的“职业破局”已结出果实，但生态略显失衡。我注意到你将“架构设计”连接到了“身心修复”，这种高质量的深度工作确实为你换来了更好的内心平静。下个月，试着给财富之树多浇点水吧。";
+  }
+
+  try {
+    const forestContext = forest.map(l => `${l.canonicalTitle} (${l.intent}): ${l.count}次`).join(', ');
+    const linksContext = synergyLinks.map(l => {
+      const source = forest.find(f => f.id === l.sourceLeafId);
+      return source ? `${source.canonicalTitle} -> ${l.targetIntent}` : '';
+    }).filter(Boolean).join(', ');
+    const themesContext = focusThemes.map(t => t.intent).join(', ');
+
+    const prompt = `
+# Role
+你是一位具有哲学深度和行为心理学背景的“人生教练”。请基于用户本季度的“意图森林”生态数据，撰写一份极具启发性的《季度生态审计报告》。
+
+# Data
+- 聚焦主题: ${themesContext}
+- 森林叶片 (任务及完成次数): ${forestContext}
+- 跨树连线 (复利效应): ${linksContext}
+
+# Analysis Dimensions
+1. 生态多样性：三棵核心意图树的生长比例是否失衡？
+2. 复利效应：分析用户手动建立的【跨意图连线】，指出哪些行为产生了跨领域的正向影响。
+3. 熵增预警：分析数据，指出用户的心理阻碍点或需要改进的地方。
+
+# Tone
+语气要温暖、睿智、具有洞察力，避免冷冰冰的报表感。字数控制在150字左右。
     `;
 
     const response = await ai.models.generateContent({
@@ -329,15 +416,12 @@ export const getCanonicalTaskName = async (newTaskTitle: string, existingLeaves:
       contents: prompt,
     });
 
-    return response.text?.trim() || newTaskTitle;
-
+    return response.text?.trim() || "暂无报告";
   } catch (error) {
-    console.error("AI Semantic Match Error:", error);
-    return newTaskTitle;
+    console.error("AI Quarterly Review Error:", error);
+    return "AI 季度报告生成失败，请稍后再试。";
   }
 };
-
-
 export const generateFocusTags = async (intent: TaskIntent, recentTasks: Task[]): Promise<string[]> => {
   if (!process.env.API_KEY) return [];
 

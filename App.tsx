@@ -7,12 +7,13 @@ import EchoCompass from './components/EchoCompass';
 import BottomNav from './components/BottomNav';
 import Sidebar from './components/Sidebar';
 import EchoOnboarding from './components/EchoOnboarding';
-import { getCanonicalTaskName } from './services/geminiService';
+import { semanticLeafMerge } from './services/geminiService';
 import { useUserStore } from './store/useUserStore';
 
 // Initial State
 const initialState: AppState = {
   forest: [], // Initialize empty forest
+  synergyLinks: [], // Initialize empty links
   quarterlyGoal: "Learn React Native & Get Promoted",
   activeTab: Tab.FUNNEL,
   loading: false,
@@ -34,11 +35,18 @@ const reducer = (state: AppState, action: Action): AppState => {
       return {
         ...state,
         forest: state.forest.map(leaf => 
-          leaf.canonicalTitle === action.payload.canonicalTitle 
-            ? { ...leaf, count: leaf.count + 1 } 
+          leaf.id === action.payload.id 
+            ? { 
+                ...leaf, 
+                count: leaf.count + 1, 
+                isFruit: (leaf.count + 1) >= 10,
+                completedTasks: [...(leaf.completedTasks || []), { taskId: action.payload.taskId, completedAt: action.payload.completedAt }]
+              } 
             : leaf
         )
       };
+    case 'ADD_SYNERGY_LINK':
+      return { ...state, synergyLinks: [...state.synergyLinks, action.payload] };
     
     // Onboarding
     case 'COMPLETE_ONBOARDING':
@@ -102,25 +110,8 @@ const App: React.FC = () => {
 
   // Helper: Process new tasks for the Forest
   const processNewForestTasks = async (newTasks: Task[]) => {
-    for (const task of newTasks) {
-      // Semantic check
-      const canonicalName = await getCanonicalTaskName(task.title, state.forest);
-      
-      const existingLeaf = state.forest.find(l => l.canonicalTitle === canonicalName);
-      
-      if (!existingLeaf) {
-        // Create Seed
-        const newLeaf: LeafNode = {
-          id: `leaf-${Date.now()}-${Math.random()}`,
-          canonicalTitle: canonicalName,
-          originalTitles: [task.title],
-          count: 0, // Seeds start at 0
-          category: task.category || TaskCategory.WORK,
-          level: 1
-        };
-        dispatch({ type: 'ADD_LEAF', payload: newLeaf });
-      }
-    }
+    // We no longer process tasks into the forest when they are generated.
+    // They only enter the forest when they are COMPLETED.
   };
 
   const handleTasksGenerated = (newTasks: Task[]) => {
@@ -131,9 +122,6 @@ const App: React.FC = () => {
     
     setTasks(updatedTasks);
     dispatch({ type: 'SET_TAB', payload: Tab.TIMELINE });
-    
-    // Process for Forest
-    processNewForestTasks(newTasks);
   };
 
   const handleTabChange = (tab: Tab) => {
@@ -154,20 +142,31 @@ const App: React.FC = () => {
     // If we just completed it (was false, now true)
     if (!wasCompleted) {
        incrementDailyAnchors(); // Increment stars in store
-       const canonicalName = await getCanonicalTaskName(task.title, state.forest);
-       dispatch({ type: 'GROW_LEAF', payload: { canonicalTitle: canonicalName } });
+       
+       // Semantic Merge Logic
+       const result = await semanticLeafMerge(task.title, task.intent, state.forest, focusThemes);
+       
+       if (result.action === 'MERGE' && result.targetLeafId) {
+         dispatch({ type: 'GROW_LEAF', payload: { id: result.targetLeafId, taskId: task.id, completedAt: new Date().toISOString() } });
+       } else {
+         const newLeaf: LeafNode = {
+           id: `leaf-${Date.now()}-${Math.random()}`,
+           canonicalTitle: result.canonicalTitle || task.title.substring(0, 4),
+           originalTitles: [task.title],
+           count: 1, // Start at 1 since it's completed
+           category: task.category || TaskCategory.WORK,
+           level: 1,
+           isFruit: false,
+           intent: task.intent,
+           completedTasks: [{ taskId: task.id, completedAt: new Date().toISOString() }]
+         };
+         dispatch({ type: 'ADD_LEAF', payload: newLeaf });
+       }
     }
   };
 
   const handleUpdateTasks = (updatedTasks: Task[]) => {
-    // Detect new tasks created manually in Timeline
-    const newTasks = updatedTasks.filter(u => !tasks.find(existing => existing.id === u.id));
-    
     setTasks(updatedTasks);
-    
-    if (newTasks.length > 0) {
-      processNewForestTasks(newTasks);
-    }
   };
 
   const handleOnboardingComplete = (profile: UserProfile) => {
@@ -196,7 +195,13 @@ const App: React.FC = () => {
       case Tab.PODS:
         return <CommutePod />;
       case Tab.COMPASS:
-        return <EchoCompass themes={focusThemes} onUpdateThemes={setFocusThemes} />;
+        return <EchoCompass 
+          themes={focusThemes} 
+          onUpdateThemes={setFocusThemes} 
+          forest={state.forest}
+          synergyLinks={state.synergyLinks}
+          onAddSynergyLink={(link) => dispatch({ type: 'ADD_SYNERGY_LINK', payload: link })}
+        />;
       default:
         return (
           <FocusFunnel 

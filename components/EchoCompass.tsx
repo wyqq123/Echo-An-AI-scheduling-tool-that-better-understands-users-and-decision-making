@@ -1,14 +1,18 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Plus, Compass, Star, Leaf, Rocket, BookOpen, Heart, DollarSign, Palette, PieChart, Activity } from 'lucide-react';
-import { FocusTheme, TaskIntent } from '../types';
+import { FocusTheme, TaskIntent, LeafNode, SynergyLink } from '../types';
 import IntentSetupModal from './IntentSetupModal';
+import TaskForest from './TaskForest';
 import { useUserStore } from '../store/useUserStore';
 import { PieChart as RechartsPieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 
 interface EchoCompassProps {
   themes: FocusTheme[];
   onUpdateThemes: (themes: FocusTheme[]) => void;
+  forest: LeafNode[];
+  synergyLinks: SynergyLink[];
+  onAddSynergyLink: (link: SynergyLink) => void;
 }
 
 export const COMPASS_INTENTS = [
@@ -56,19 +60,23 @@ export const COMPASS_INTENTS = [
   },
 ];
 
-const EchoCompass: React.FC<EchoCompassProps> = ({ themes, onUpdateThemes }) => {
+const EchoCompass: React.FC<EchoCompassProps> = ({ themes, onUpdateThemes, forest, synergyLinks, onAddSynergyLink }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingSlotIndex, setEditingSlotIndex] = useState<number | null>(null);
   const { dailyAnchorsCompleted, dailyCommuteStats } = useUserStore();
+  const safeAnchorsCompleted = dailyAnchorsCompleted || 0;
+
+  // Safe fallback for legacy state where dailyCommuteStats might be undefined
+  const safeCommuteStats = dailyCommuteStats || { production: 0, growth: 0, recovery: 0 };
 
   // --- Data for Pie Chart ---
   const pieData = [
-    { name: 'Production', value: dailyCommuteStats.production, color: '#3b82f6' }, // Blue
-    { name: 'Growth', value: dailyCommuteStats.growth, color: '#10b981' },     // Green
-    { name: 'Recovery', value: dailyCommuteStats.recovery, color: '#a855f7' },   // Purple
+    { name: 'Production', value: safeCommuteStats.production, color: '#3b82f6' }, // Blue
+    { name: 'Growth', value: safeCommuteStats.growth, color: '#10b981' },     // Green
+    { name: 'Recovery', value: safeCommuteStats.recovery, color: '#a855f7' },   // Purple
   ].filter(d => d.value > 0);
 
-  const totalSeconds = dailyCommuteStats.production + dailyCommuteStats.growth + dailyCommuteStats.recovery;
+  const totalSeconds = safeCommuteStats.production + safeCommuteStats.growth + safeCommuteStats.recovery;
 
   // 打开配置弹窗
   const handleOpenSetup = (index: number) => {
@@ -153,21 +161,21 @@ const EchoCompass: React.FC<EchoCompassProps> = ({ themes, onUpdateThemes }) => 
                  key={i}
                  initial={false}
                  animate={{ 
-                   scale: i < dailyAnchorsCompleted ? [1, 1.2, 1] : 1,
-                   filter: i < dailyAnchorsCompleted ? 'grayscale(0%)' : 'grayscale(100%) opacity(30%)'
+                   scale: i < safeAnchorsCompleted ? [1, 1.2, 1] : 1,
+                   filter: i < safeAnchorsCompleted ? 'grayscale(0%)' : 'grayscale(100%) opacity(30%)'
                  }}
                  transition={{ duration: 0.5, delay: i * 0.1 }}
                >
                  <Star 
                    size={32} 
-                   className={i < dailyAnchorsCompleted ? "text-amber-400 fill-amber-400 drop-shadow-[0_0_10px_rgba(251,191,36,0.6)]" : "text-slate-600"} 
-                   strokeWidth={i < dailyAnchorsCompleted ? 0 : 2}
+                   className={i < safeAnchorsCompleted ? "text-amber-400 fill-amber-400 drop-shadow-[0_0_10px_rgba(251,191,36,0.6)]" : "text-slate-600"} 
+                   strokeWidth={i < safeAnchorsCompleted ? 0 : 2}
                  />
                </motion.div>
              ))}
            </div>
            <p className="text-xs text-slate-500 mt-4 font-mono">
-             {dailyAnchorsCompleted}/3 Completed Today
+             {safeAnchorsCompleted}/3 Completed Today
            </p>
         </div>
 
@@ -232,6 +240,22 @@ const EchoCompass: React.FC<EchoCompassProps> = ({ themes, onUpdateThemes }) => 
           })}
         </div>
       </div>
+
+      {/* --- Section 3: Task Forest --- */}
+      {themes.length > 0 && (
+        <div className="mt-8">
+          <div className="flex items-center gap-2 mb-4 px-2">
+            <Leaf className="text-green-500" size={20} />
+            <h2 className="text-xl font-bold text-white">Task Forest</h2>
+          </div>
+          <TaskForest 
+            themes={themes} 
+            forest={forest} 
+            synergyLinks={synergyLinks} 
+            onAddSynergyLink={onAddSynergyLink} 
+          />
+        </div>
+      )}
 
       {/* 配置弹窗 */}
       <AnimatePresence>
