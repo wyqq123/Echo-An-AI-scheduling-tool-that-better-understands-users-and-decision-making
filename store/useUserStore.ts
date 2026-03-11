@@ -14,8 +14,10 @@ interface UserState {
   lastActiveDate: string;        // Last active date ISO String
   dailyAnchorsCompleted: number; // Stars lit in Echo Compass
   dailyCommuteStats: { production: number; growth: number; recovery: number }; // Seconds spent in each pod type
+  aiReport: string | null;
   
   setTasks: (tasks: Task[]) => void;
+  setAiReport: (report: string | null) => void;
   checkAndResetDailyState: () => void;
   incrementDailyAnchors: () => void;
   updateCommuteStats: (type: 'production' | 'growth' | 'recovery', seconds: number) => void;
@@ -32,8 +34,10 @@ export const useUserStore = create<UserState>()(
       lastActiveDate: new Date().toISOString(),
       dailyAnchorsCompleted: 0,
       dailyCommuteStats: { production: 0, growth: 0, recovery: 0 },
+      aiReport: null,
 
       setTasks: (tasks) => set({ tasks }),
+      setAiReport: (aiReport) => set({ aiReport }),
 
       incrementDailyAnchors: () => set((state) => ({ dailyAnchorsCompleted: (state.dailyAnchorsCompleted || 0) + 1 })),
 
@@ -86,9 +90,6 @@ export const useUserStore = create<UserState>()(
             dailyCommuteStats: { production: 0, growth: 0, recovery: 0 }, // Reset commute stats
             lastActiveDate: today.toISOString(), // Update last active date
           });
-        } else {
-            // Even if same day, update last active date to keep it fresh
-            set({ lastActiveDate: today.toISOString() });
         }
       },
     }),

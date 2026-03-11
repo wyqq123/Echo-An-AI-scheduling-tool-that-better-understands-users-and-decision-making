@@ -9,6 +9,7 @@ import { Task, TaskCategory, TaskStatus, FunnelStep } from '../types';
 import { format } from 'date-fns';
 import { useUserStore } from '../store/useUserStore';
 import TaskCard from './TaskCard';
+import { generateId } from '../utils/helpers';
 
 interface Props {
   onTasksGenerated: (tasks: Task[]) => void;
@@ -68,7 +69,7 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
 
     const fullTasks = tasks.map(t => ({
       ...t,
-      id: t.id || crypto.randomUUID(),
+      id: t.id || generateId(),
       status: TaskStatus.CANDIDATE, // Start as Candidate
       isAnchor: false,
       isFrozen: false, // Revived ones are un-frozen

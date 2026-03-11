@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { format, addDays, isSameDay } from 'date-fns';
 import confetti from 'canvas-confetti';
+import { generateId } from '../utils/helpers';
 
 interface Props {
   tasks: Task[];
@@ -214,7 +215,7 @@ const FluidTimeline: React.FC<Props> = ({ tasks, onToggleTask, onUpdateTasks }) 
 
     // If it's a temp task, give it a real ID and add it
     if (finalizedTask.id.startsWith('temp')) {
-      finalizedTask.id = crypto.randomUUID();
+      finalizedTask.id = generateId();
       // Calculate initial collisions for new task
       const dayTasks = tasks.filter(t => t.dateStr === finalizedTask.dateStr);
       const resolved = resolveCollisions(finalizedTask, dayTasks);

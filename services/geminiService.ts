@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Task, TaskCategory, FunnelStep, TaskStatus, LeafNode, TaskIntent, FocusTheme } from "../types";
+import { generateId } from "../utils/helpers";
 
 // Initialize Gemini
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -68,7 +69,7 @@ export const parseBrainDump = async (text: string, focusThemes: FocusTheme[] = [
 
     const rawTasks = JSON.parse(response.text || "[]");
     return rawTasks.map((t: any) => ({
-      id: t.id || crypto.randomUUID(),
+      id: t.id || generateId(),
       title: t.title,
       intent: t.intent as TaskIntent,
       category: mapIntentToCategory(t.intent as TaskIntent),

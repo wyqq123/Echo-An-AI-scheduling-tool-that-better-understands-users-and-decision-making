@@ -5,6 +5,7 @@ import { FocusTheme, TaskIntent } from '../types';
 import { COMPASS_INTENTS } from './EchoCompass';
 import { useUserStore } from '../store/useUserStore';
 import { generateFocusTags } from '../services/geminiService';
+import { generateId } from '../utils/helpers';
 
 interface IntentSetupModalProps {
   existingTheme?: FocusTheme;
@@ -97,7 +98,7 @@ const IntentSetupModal: React.FC<IntentSetupModalProps> = ({ existingTheme, used
   const handleSave = () => {
     if (!selectedIntent || selectedTags.length === 0) return;
     onSave({
-      id: isValidTheme && existingTheme ? existingTheme.id : crypto.randomUUID(),
+      id: isValidTheme && existingTheme ? existingTheme.id : generateId(),
       intent: selectedIntent,
       tags: selectedTags,
       isPrimary: true,

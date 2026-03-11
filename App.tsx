@@ -7,7 +7,7 @@ import EchoCompass from './components/EchoCompass';
 import BottomNav from './components/BottomNav';
 import Sidebar from './components/Sidebar';
 import EchoOnboarding from './components/EchoOnboarding';
-import { semanticLeafMerge } from './services/geminiService';
+import { semanticLeafMerge, generateQuarterlyReview } from './services/geminiService';
 import { useUserStore } from './store/useUserStore';
 import { getCurrentQuarterId } from './utils/dateUtils';
 
@@ -78,7 +78,7 @@ const App: React.FC = () => {
   const [state, dispatch] = useReducer(reducer, initial);
 
   // Store Hooks
-  const { tasks, setTasks, checkAndResetDailyState, incrementDailyAnchors, focusThemes, setFocusThemes } = useUserStore();
+  const { tasks, setTasks, checkAndResetDailyState, incrementDailyAnchors, focusThemes, setFocusThemes, setAiReport } = useUserStore();
 
   // Migration: Sync userProfile themes to store if store is empty
   useEffect(() => {
@@ -166,8 +166,20 @@ const App: React.FC = () => {
        // Semantic Merge Logic
        const result = await semanticLeafMerge(task.title, task.intent, state.forest, focusThemes, quarterId);
        
+       let updatedForest = [...state.forest];
+
        if (result.action === 'MERGE' && result.targetLeafId) {
          dispatch({ type: 'GROW_LEAF', payload: { id: result.targetLeafId, taskId: task.id, completedAt: new Date().toISOString() } });
+         updatedForest = updatedForest.map(leaf => 
+           leaf.id === result.targetLeafId 
+             ? { 
+                 ...leaf, 
+                 count: leaf.count + 1, 
+                 isFruit: (leaf.count + 1) >= 10,
+                 completedTasks: [...(leaf.completedTasks || []), { taskId: task.id, completedAt: new Date().toISOString() }]
+               } 
+             : leaf
+         );
        } else {
          const newLeaf: LeafNode = {
            id: `leaf-${Date.now()}-${Math.random()}`,
@@ -182,6 +194,15 @@ const App: React.FC = () => {
            completedTasks: [{ taskId: task.id, completedAt: new Date().toISOString() }]
          };
          dispatch({ type: 'ADD_LEAF', payload: newLeaf });
+         updatedForest.push(newLeaf);
+       }
+       
+       // Trigger AI Report Generation in the background after a task is completed
+       if (focusThemes.length > 0) {
+         // We don't await this to avoid blocking the UI
+         generateQuarterlyReview(updatedForest, state.synergyLinks, focusThemes)
+           .then(report => setAiReport(report))
+           .catch(err => console.error("Failed to generate report", err));
        }
     }
   };

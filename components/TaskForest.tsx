@@ -3,8 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Sparkles } from 'lucide-react';
 import { FocusTheme, LeafNode, SynergyLink, TreeData, TaskIntent } from '../types';
 import { COMPASS_INTENTS } from './EchoCompass';
-import { generateQuarterlyReview } from '../services/geminiService';
 import { getCurrentQuarterId, isCurrentQuarter } from '../utils/dateUtils';
+import { useUserStore } from '../store/useUserStore';
 
 interface TaskForestProps {
   themes: FocusTheme[];
@@ -15,23 +15,9 @@ interface TaskForestProps {
 
 const TaskForest: React.FC<TaskForestProps> = ({ themes, forest, synergyLinks, onAddSynergyLink }) => {
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
-  const [aiReport, setAiReport] = useState<string | null>(null);
-  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  const { aiReport } = useUserStore();
   const containerRef = useRef<HTMLDivElement>(null);
   const [treePositions, setTreePositions] = useState<Record<string, { x: number, y: number }>>({});
-
-  // Generate AI Report
-  useEffect(() => {
-    const fetchReport = async () => {
-      setIsGeneratingReport(true);
-      const report = await generateQuarterlyReview(forest, synergyLinks, themes);
-      setAiReport(report);
-      setIsGeneratingReport(false);
-    };
-    if (themes.length > 0) {
-      fetchReport();
-    }
-  }, [forest.length, synergyLinks.length, themes]);
 
   // Build Tree Data
   const trees: Record<string, TreeData> = {};
@@ -122,16 +108,16 @@ const TaskForest: React.FC<TaskForestProps> = ({ themes, forest, synergyLinks, o
   // AI Banner
   const renderAIBanner = () => (
     <motion.div 
-      initial={{ y: -50, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      className="absolute top-6 left-1/2 -translate-x-1/2 w-[90%] max-w-lg bg-slate-900/80 backdrop-blur-xl border border-purple-500/30 rounded-2xl p-4 z-50 shadow-2xl"
+      initial={{ x: -50, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      className="absolute top-6 left-6 w-80 bg-slate-900/80 backdrop-blur-xl border border-purple-500/30 rounded-2xl p-4 z-50 shadow-2xl"
     >
       <div className="flex items-center gap-2 mb-2">
         <Sparkles className="text-purple-400" size={18} />
         <h3 className="text-white font-bold text-sm">先知洞察 (AI 季度报告)</h3>
       </div>
       <p className="text-slate-300 text-xs leading-relaxed">
-        {isGeneratingReport ? "正在生成生态审计报告..." : aiReport}
+        {aiReport || "Complete tasks to generate your quarterly ecosystem report..."}
       </p>
     </motion.div>
   );
