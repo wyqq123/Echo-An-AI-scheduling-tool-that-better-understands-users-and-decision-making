@@ -61,6 +61,7 @@ export const COMPASS_INTENTS = [
 ];
 
 const EchoCompass: React.FC<EchoCompassProps> = ({ themes, onUpdateThemes, forest, synergyLinks, onAddSynergyLink }) => {
+  console.log("EchoCompass received themes:", themes);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingSlotIndex, setEditingSlotIndex] = useState<number | null>(null);
   const { dailyAnchorsCompleted, dailyCommuteStats } = useUserStore();
@@ -87,6 +88,7 @@ const EchoCompass: React.FC<EchoCompassProps> = ({ themes, onUpdateThemes, fores
   // 渲染单个意图卡片（已配置状态）
   const renderFilledSlot = (theme: FocusTheme, index: number) => {
     const config = COMPASS_INTENTS.find(c => c.id === theme.intent);
+    console.log("renderFilledSlot:", { theme, config });
     
     // Fallback if config is missing (e.g. legacy data)
     if (!config) {

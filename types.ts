@@ -72,6 +72,7 @@ export interface LeafNode {
   level: number;          // Visual growth level
   isFruit?: boolean;      // Whether it has evolved into a fruit
   intent?: TaskIntent;    // Which intent tree it belongs to
+  quarterId?: string;     // Which quarter this leaf belongs to (e.g., "2026-Q1")
   completedTasks?: { taskId: string, completedAt: string }[]; // Track completed tasks and their dates
 }
 

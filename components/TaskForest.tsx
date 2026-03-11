@@ -4,6 +4,7 @@ import { Sparkles } from 'lucide-react';
 import { FocusTheme, LeafNode, SynergyLink, TreeData, TaskIntent } from '../types';
 import { COMPASS_INTENTS } from './EchoCompass';
 import { generateQuarterlyReview } from '../services/geminiService';
+import { getCurrentQuarterId, isCurrentQuarter } from '../utils/dateUtils';
 
 interface TaskForestProps {
   themes: FocusTheme[];
@@ -35,38 +36,44 @@ const TaskForest: React.FC<TaskForestProps> = ({ themes, forest, synergyLinks, o
   // Build Tree Data
   const trees: Record<string, TreeData> = {};
   const positions = ['top', 'bottomLeft', 'bottomRight'];
-  
-  const now = new Date();
-  const currentQuarter = Math.floor(now.getMonth() / 3) + 1;
-  const currentYear = now.getFullYear();
-
-  const isCurrentQuarter = (dateString: string) => {
-    const date = new Date(dateString);
-    const quarter = Math.floor(date.getMonth() / 3) + 1;
-    return date.getFullYear() === currentYear && quarter === currentQuarter;
-  };
+  const currentQuarterId = getCurrentQuarterId();
   
   themes.forEach((theme, index) => {
     if (index >= 3) return;
     const config = COMPASS_INTENTS.find(c => c.id === theme.intent);
     
-    // Filter leaves and their counts for the current quarter
+    // ✅ FIX: Filter leaves to only show current quarter data
+    // Use quarterId for direct filtering (faster than checking each completedTask)
     const leaves = forest
-      .map(leaf => {
-        if (!leaf.completedTasks) {
-          // Backward compatibility: if no completedTasks array, assume it's valid
-          return leaf;
+      .filter(leaf => {
+        // Check if leaf belongs to current quarter and matches the theme intent
+        if (leaf.quarterId && leaf.quarterId !== currentQuarterId) {
+          return false;
         }
-        const currentQuarterTasks = leaf.completedTasks.filter(t => isCurrentQuarter(t.completedAt));
-        if (currentQuarterTasks.length === 0) return null;
+        if (leaf.intent !== theme.intent) {
+          return false;
+        }
         
-        return {
-          ...leaf,
-          count: currentQuarterTasks.length,
-          isFruit: currentQuarterTasks.length >= 10
-        };
+        // For backward compatibility with old data without quarterId
+        if (!leaf.quarterId && leaf.completedTasks) {
+          const currentQuarterTasks = leaf.completedTasks.filter(t => isCurrentQuarter(t.completedAt));
+          return currentQuarterTasks.length > 0;
+        }
+        
+        return true;
       })
-      .filter((l): l is LeafNode => l !== null && l.intent === theme.intent);
+      .map(leaf => {
+        // Recalculate count based on current quarter tasks
+        if (leaf.completedTasks) {
+          const currentQuarterTasks = leaf.completedTasks.filter(t => isCurrentQuarter(t.completedAt));
+          return {
+            ...leaf,
+            count: currentQuarterTasks.length,
+            isFruit: currentQuarterTasks.length >= 10
+          };
+        }
+        return leaf;
+      });
 
     const totalTasks = leaves.reduce((sum, l) => sum + l.count, 0);
     

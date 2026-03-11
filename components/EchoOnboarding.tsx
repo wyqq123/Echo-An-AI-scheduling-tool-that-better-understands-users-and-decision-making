@@ -52,7 +52,7 @@ export default function EchoOnboarding({ onComplete }: EchoOnboardingProps) {
         id: d.id,
         intent: d.title as TaskIntent,
         tags: [refinedFocus[id] || d.options[0]],
-        isPrimary: false
+        isPrimary: true
       };
     });
 

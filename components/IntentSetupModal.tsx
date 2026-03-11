@@ -100,7 +100,7 @@ const IntentSetupModal: React.FC<IntentSetupModalProps> = ({ existingTheme, used
       id: isValidTheme && existingTheme ? existingTheme.id : crypto.randomUUID(),
       intent: selectedIntent,
       tags: selectedTags,
-      isPrimary: isValidTheme && existingTheme ? existingTheme.isPrimary : false,
+      isPrimary: true,
     });
   };
 

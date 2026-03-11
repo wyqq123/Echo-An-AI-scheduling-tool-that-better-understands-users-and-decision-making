@@ -1,5 +1,5 @@
 import React, { useReducer, useEffect } from 'react';
-import { Tab, AppState, Action, Task, LeafNode, TaskCategory, UserProfile } from './types';
+import { Tab, AppState, Action, Task, LeafNode, TaskCategory, UserProfile, TaskStatus } from './types';
 import FocusFunnel from './components/FocusFunnel';
 import FluidTimeline from './components/FluidTimeline';
 import CommutePod from './components/CommutePod';
@@ -9,6 +9,7 @@ import Sidebar from './components/Sidebar';
 import EchoOnboarding from './components/EchoOnboarding';
 import { semanticLeafMerge } from './services/geminiService';
 import { useUserStore } from './store/useUserStore';
+import { getCurrentQuarterId } from './utils/dateUtils';
 
 // Initial State
 const initialState: AppState = {
@@ -56,7 +57,7 @@ const reducer = (state: AppState, action: Action): AppState => {
         userProfile: action.payload,
         // Update quarterly goal if themes are set, just taking the first one as a placeholder or combining them
         quarterlyGoal: action.payload.quarterlyThemes.length > 0 
-          ? action.payload.quarterlyThemes.map(t => t.title).join(', ')
+          ? action.payload.quarterlyThemes.map(t => t.intent).join(', ')
           : state.quarterlyGoal
       };
 
@@ -78,6 +79,13 @@ const App: React.FC = () => {
 
   // Store Hooks
   const { tasks, setTasks, checkAndResetDailyState, incrementDailyAnchors, focusThemes, setFocusThemes } = useUserStore();
+
+  // Migration: Sync userProfile themes to store if store is empty
+  useEffect(() => {
+    if (state.userProfile?.quarterlyThemes && state.userProfile.quarterlyThemes.length > 0 && focusThemes.length === 0) {
+      setFocusThemes(state.userProfile.quarterlyThemes);
+    }
+  }, [state.userProfile, focusThemes.length, setFocusThemes]);
 
   // Daily Reset Effect
   useEffect(() => {
@@ -141,10 +149,22 @@ const App: React.FC = () => {
 
     // If we just completed it (was false, now true)
     if (!wasCompleted) {
-       incrementDailyAnchors(); // Increment stars in store
+       if (task.status === TaskStatus.ANCHOR || task.status === TaskStatus.ICEBREAKER) {
+         incrementDailyAnchors(); // Increment stars in store
+       }
+       
+       // ✅ FIX #1: Check if the task's intent is in the current quarterly focus themes
+       const isRelevantToCurrentQuarter = task.intent && focusThemes.some(theme => theme.intent === task.intent);
+       
+       if (!isRelevantToCurrentQuarter) {
+         console.log(`Task "${task.title}" completed but intent "${task.intent}" is not in current quarterly themes. Skipping forest update.`);
+         return;
+       }
+       
+       const quarterId = getCurrentQuarterId();
        
        // Semantic Merge Logic
-       const result = await semanticLeafMerge(task.title, task.intent, state.forest, focusThemes);
+       const result = await semanticLeafMerge(task.title, task.intent, state.forest, focusThemes, quarterId);
        
        if (result.action === 'MERGE' && result.targetLeafId) {
          dispatch({ type: 'GROW_LEAF', payload: { id: result.targetLeafId, taskId: task.id, completedAt: new Date().toISOString() } });
@@ -158,6 +178,7 @@ const App: React.FC = () => {
            level: 1,
            isFruit: false,
            intent: task.intent,
+           quarterId: quarterId,
            completedTasks: [{ taskId: task.id, completedAt: new Date().toISOString() }]
          };
          dispatch({ type: 'ADD_LEAF', payload: newLeaf });

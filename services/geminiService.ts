@@ -23,7 +23,7 @@ export const parseBrainDump = async (text: string, focusThemes: FocusTheme[] = [
       ? `Existing Icebox Tasks (Frozen): ${JSON.stringify(iceboxTasks.map(t => ({ id: t.id, title: t.title, intent: t.intent })))}` 
       : "No Icebox Tasks.";
 
-    const themeString = focusThemes.map(t => `${t.intent} (${t.tags.join(', ')})`).join("; ");
+    const themeString = focusThemes.map(t => `${t.intent} (${(t.tags || []).join(', ')})`).join("; ");
 
     const prompt = `
       You are an AI assistant for a productivity app called "Echo".
@@ -130,7 +130,7 @@ export const generateFunnelScript = async (
   const hasThemes = focusThemes.length > 0;
 
   if (hasThemes) {
-    const themeString = focusThemes.map(t => `【${t.intent}: ${t.tags.join(', ')}】`).join('; ');
+    const themeString = focusThemes.map(t => `【${t.intent}: ${(t.tags || []).join(', ')}】`).join('; ');
     themeContext = `Current user's quarterly focus themes are: ${themeString}.`;
     fallbackInstruction = `When evaluating task value, strictly refer to the above focus themes.`;
   } else {
@@ -307,7 +307,8 @@ export const semanticLeafMerge = async (
   completedTaskTitle: string,
   currentIntent: TaskIntent | undefined,
   existingLeaves: LeafNode[],
-  focusThemes: FocusTheme[]
+  focusThemes: FocusTheme[],
+  quarterId?: string
 ): Promise<{ action: 'MERGE' | 'CREATE'; targetLeafId?: string; canonicalTitle?: string }> => {
   if (!process.env.API_KEY) {
     return { action: 'CREATE', canonicalTitle: completedTaskTitle.substring(0, 4) };
@@ -315,11 +316,11 @@ export const semanticLeafMerge = async (
 
   try {
     const existingLeafData = existingLeaves
-      .filter(l => l.intent === currentIntent)
+      .filter(l => l.intent === currentIntent && (!quarterId || l.quarterId === quarterId))
       .map(l => ({ id: l.id, title: l.canonicalTitle }));
       
     const existingLeafJson = JSON.stringify(existingLeafData);
-    const themesString = focusThemes.map(t => `${t.intent}: ${t.tags.join(', ')}`).join('; ');
+    const themesString = focusThemes.map(t => `${t.intent}: ${(t.tags || []).join(', ')}`).join('; ');
 
     const prompt = `
 # Role
