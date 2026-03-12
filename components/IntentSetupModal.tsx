@@ -33,12 +33,12 @@ const IntentSetupModal: React.FC<IntentSetupModalProps> = ({ existingTheme, used
     
     // Default mock tags based on the user's image
     const mockTags: Record<string, string[]> = {
-      [TaskIntent.BODY_MIND]: ['深度睡眠优化', '压力阈值调节', '身体机能重塑'],
-      [TaskIntent.CAREER_BREAK]: ['核心竞争力升维', '职场关系破冰', '副业杠杆构建'],
-      [TaskIntent.ACADEMIC_SPRINT]: ['知识体系内化', '考证/语言突破', '绩点稳产计划'],
-      [TaskIntent.DEEP_CONNECT]: ['亲密关系共振', '家族能量修复', '社交降噪行动'],
-      [TaskIntent.WEALTH_CONTROL]: ['消费主义抵抗', '资产配置优化', '增量收入实验'],
-      [TaskIntent.INNER_WILD]: ['审美感官复苏', '创意灵感记录', '空间/地理流浪'],
+      [TaskIntent.BODY_MIND]: ['Deep Sleep Optimization', 'Stress Threshold Adjustment', 'Physical Function Remodeling'],
+      [TaskIntent.CAREER_BREAK]: ['Core Competency Upgrade', 'Workplace Relationship Ice-breaking', 'Side Business Leverage Building'],
+      [TaskIntent.ACADEMIC_SPRINT]: ['Knowledge System Internalization', 'Certification/Language Breakthrough', 'Stable GPA Plan'],
+      [TaskIntent.DEEP_CONNECT]: ['Intimate Relationship Resonance', 'Family Energy Repair', 'Social Noise Reduction Actions'],
+      [TaskIntent.WEALTH_CONTROL]: ['Consumerism Resistance', 'Asset Allocation Optimization', 'Incremental Income Experiments'],
+      [TaskIntent.INNER_WILD]: ['Aesthetic Sense Revival', 'Creative Inspiration Recording', 'Spatial/Geographical Wandering']
     };
     
     let tags = mockTags[intent] || ['Focus 1', 'Focus 2', 'Focus 3'];

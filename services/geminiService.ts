@@ -12,6 +12,43 @@ export interface FunnelScript {
   q4: { question: string; isStale?: boolean };
 }
 
+function cosineSimilarity(vecA: number[], vecB: number[]): number {
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+function formatWorkflowNote(task: any): string {
+  const path = task.intent_analysis?.chosen_path;
+  let note = "";
+  if (path === "LINEAR" && task.linear_flow) {
+    const flow = task.linear_flow;
+    note += `**Linear Flow**\n`;
+    if (flow.starter) note += `1. **Starter**: ${flow.starter}\n`;
+    if (flow.pre_actions?.length) note += `2. **Pre-actions**:\n   - ${flow.pre_actions.join('\n   - ')}\n`;
+    if (flow.core_execution?.length) note += `3. **Core Execution**:\n   - ${flow.core_execution.join('\n   - ')}\n`;
+    if (flow.post_actions?.length) note += `4. **Post-actions**:\n   - ${flow.post_actions.join('\n   - ')}\n`;
+  } else if (path === "DIMENSIONAL" && task.dimensional_flow) {
+    note += `**Dimensional Flow**\n`;
+    task.dimensional_flow.forEach((d: any) => {
+      note += `* **${d.dimension_name}**\n`;
+      if (d.sub_tasks?.length) {
+        note += `  - ${d.sub_tasks.join('\n  - ')}\n`;
+      }
+    });
+  } else {
+    note = "No detailed workflow generated.";
+  }
+  return note.trim();
+}
+
 export const parseBrainDump = async (text: string, focusThemes: FocusTheme[] = [], iceboxTasks: Task[] = []): Promise<Partial<Task>[]> => {
   if (!process.env.API_KEY) {
     console.warn("No API Key provided, returning mock data");
@@ -24,28 +61,39 @@ export const parseBrainDump = async (text: string, focusThemes: FocusTheme[] = [
       ? `Existing Icebox Tasks (Frozen): ${JSON.stringify(iceboxTasks.map(t => ({ id: t.id, title: t.title, intent: t.intent })))}` 
       : "No Icebox Tasks.";
 
-    const themeString = focusThemes.map(t => `${t.intent} (${(t.tags || []).join(', ')})`).join("; ");
-
     const prompt = `
-      You are an AI assistant for a productivity app called "Echo".
-      User Input: "${text}"
-      Current Focus Themes: ${themeString}
-      ${iceboxContext}
+      # Role
+      You are a senior efficiency expert, skilled at transforming vague intentions into highly certain execution paths. You are proficient in managing OKRs in large companies and in the growth pathways of senior students (job seeking/graduate school preparation).
 
-      Instructions:
-      1. Aggregate actions pointing to the same deliverable or workflow into a single COMPOSITE task.
-      2. Keep the main title concise and action-oriented.
-      3. List specific execution steps in logical order in the 'workflowNote' field (use numbered list format).
-      4. Assign an intent strictly from: [${Object.values(TaskIntent).join(", ")}].
-      5. Estimate duration in minutes (default 30 if unknown).
-      6. **Semantic Deduplication**: Check if any new task is semantically identical to an Existing Icebox Task.
-         - If HIGHLY similar, return the Existing Icebox Task's ID in the 'id' field and set 'isRevived' to true.
-         - Update the title if the new input adds detail, otherwise keep existing.
-         - If not similar, generate a new UUID.
-    `;
+      # Task
+      Analyze the user's raw task input (Brain Dump) and complete the following:
+      1. **Task Aggregation**: Combine actions pointing to the same deliverable or workflow into a comprehensive task (COMPOSITE task). If the input contains multiple independent tasks, extract them separately.
+      2. **Entity Recognition**: Identify the core verbs, deliverables, collaborators, and deadlines present in the task.
+      3. **Path Selection Logic**:
+      - Path A (LINEAR): Choose this path if the task is a **definite deliverable** (e.g., writing a document, updating a resume, sending an email) with a clear sequential execution logic. The decomposition rules for Path A:
+        1. Must include a Starter that can be initiated within 2 minutes (extremely low friction).
+        2. Identify all necessary Pre-actions (blocking items that must be completed first).
+        3. Extract the Core action (main execution step).
+        4. Define Post-actions (delivery/closure items).
+      - Path B (DIMENSIONAL): Choose this path if the task is a **broad objective/area** (e.g., preparing for graduate school, autumn job hunt, leadership improvement) that requires effort across multiple independent dimensions.
+      4. **Semantic Deduplication**: Check whether the new task semantically matches existing Icebox tasks.
+      - If highly similar, return the existing Icebox task's ID in the 'id' field and set 'isRevived' to true.
+      - If the new input adds details, update the title; otherwise, keep it unchanged.
+      - If not similar, generate a new UUID.
+      5. **Assign Intent**: Assign the most relevant intent from [${Object.values(TaskIntent).join(", ")}] as a fallback.
+      6. **Estimated Duration**: Estimate task duration in minutes (default 30).
+
+      # Rules
+      - Starter must be an extremely low-friction action that can be started within 2 minutes.
+      - Avoid empty talk; action descriptions must be as specific as 'open XX, send XX, check XX'.
+      - Language style: concise, professional.
+
+      User Input: "${text}"
+      ${iceboxContext}
+      `;
 
     const response = await model.generateContent({
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-3.1-flash-preview',
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -57,27 +105,110 @@ export const parseBrainDump = async (text: string, focusThemes: FocusTheme[] = [
               id: { type: Type.STRING, description: "New UUID or Existing Icebox ID if revived" },
               title: { type: Type.STRING },
               intent: { type: Type.STRING, enum: Object.values(TaskIntent) },
-              workflowNote: { type: Type.STRING },
               duration: { type: Type.INTEGER },
-              isRevived: { type: Type.BOOLEAN }
+              isRevived: { type: Type.BOOLEAN },
+              intent_analysis: {
+                type: Type.OBJECT,
+                properties: {
+                  entities: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Identified collaborators, tools, deadlines" },
+                  chosen_path: { type: Type.STRING, enum: ["LINEAR", "DIMENSIONAL"], description: "Determine whether the task belongs to a linear flow or a dimensional flow" },
+                  reason: { type: Type.STRING, description: "The logical basis for choosing this path" }
+                },
+                required: ["chosen_path"]
+              },
+              linear_flow: {
+                type: Type.OBJECT,
+                properties: {
+                  starter: { type: Type.STRING, description: "Startup items within 2 minutes" },
+                  pre_actions: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Prerequisite dependency" },
+                  core_execution: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Core execution step" },
+                  post_actions: { type: Type.ARRAY, items: { type: Type.STRING }, description: "后续闭环项" }
+                }
+              },
+              dimensional_flow: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    dimension_name: { type: Type.STRING, description: "When the user's input intention is vague and abstract, you need to break it down into different sub-dimensions that are related to this task or can achieve the outcomes of this task." },
+                    sub_tasks: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  }
+                }
+              }
             },
-            required: ["title", "intent", "duration"]
+            required: ["title", "intent", "duration", "intent_analysis"]
           }
         }
       }
     });
 
     const rawTasks = JSON.parse(response.text || "[]");
+
+    // --- Target Alignment using Embeddings ---
+    if (focusThemes.length > 0 && rawTasks.length > 0) {
+      try {
+        const targetStrings = focusThemes.map(theme => 
+          `[${theme.intent}] The core foucs dimensions：${(theme.tags || []).join(', ')}`
+        );
+        
+        const taskStrings = rawTasks.map((t: any) => {
+          const path = t.intent_analysis?.chosen_path;
+          let coreActionsStr = "";
+          if (path === "LINEAR" && t.linear_flow?.core_execution) {
+            coreActionsStr = t.linear_flow.core_execution.join("；");
+          } else if (path === "DIMENSIONAL" && t.dimensional_flow) {
+            coreActionsStr = t.dimensional_flow.map((d: any) => d.sub_tasks?.join("；")).join("；");
+          }
+          return `task：${t.title}。actions：${coreActionsStr}`;
+        });
+
+        const allStrings = [...targetStrings, ...taskStrings];
+        const embedResult = await ai.models.embedContent({
+          model: 'gemini-embedding-2-preview',
+          contents: allStrings,
+        });
+        
+        const embeddings = embedResult.embeddings;
+        if (embeddings && embeddings.length === allStrings.length) {
+          const targetEmbeddings = embeddings.slice(0, targetStrings.length).map(e => e.values);
+          const taskEmbeddings = embeddings.slice(targetStrings.length).map(e => e.values);
+
+          rawTasks.forEach((t: any, idx: number) => {
+            const taskVec = taskEmbeddings[idx];
+            let bestScore = -1;
+            let bestThemeIdx = -1;
+
+            targetEmbeddings.forEach((targetVec, tIdx) => {
+              if (taskVec && targetVec) {
+                const score = cosineSimilarity(taskVec, targetVec);
+                if (score > bestScore) {
+                  bestScore = score;
+                  bestThemeIdx = tIdx;
+                }
+              }
+            });
+
+            // If alignment score is high enough, override the fallback intent
+            if (bestScore >= 0.45 && bestThemeIdx !== -1) {
+              t.intent = focusThemes[bestThemeIdx].intent;
+            }
+          });
+        }
+      } catch (e) {
+        console.error("Embedding alignment failed", e);
+      }
+    }
+
     return rawTasks.map((t: any) => ({
       id: t.id || generateId(),
       title: t.title,
       intent: t.intent as TaskIntent,
       category: mapIntentToCategory(t.intent as TaskIntent),
-      workflowNote: t.workflowNote,
+      workflowNote: formatWorkflowNote(t),
       duration: t.duration,
-      status: TaskStatus.CANDIDATE, // Initial state
+      status: TaskStatus.CANDIDATE,
       isAnchor: false,
-      isFrozen: false, // Revived tasks are un-frozen
+      isFrozen: false,
       isRevived: t.isRevived || false,
       completed: false
     }));
