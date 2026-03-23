@@ -1,9 +1,15 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { Task, TaskCategory, FunnelStep, TaskStatus, LeafNode, TaskIntent, FocusTheme } from "../types";
+import { Task, TaskCategory, FunnelStep, TaskStatus, LeafNode, TaskIntent, FocusTheme, SynergyLink, UserProfile } from "../types";
 import { generateId } from "../utils/helpers";
 
 // Initialize Gemini
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Important: the @google/genai web client throws if no API key is provided.
+// We must avoid constructing the client at module-load time when running in browser without a key,
+// otherwise it will crash the whole React app before the UI can render.
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const ai = GEMINI_API_KEY
+  ? new GoogleGenAI({ apiKey: GEMINI_API_KEY })
+  : (null as unknown as GoogleGenAI);
 
 export interface FunnelScript {
   q1: { suggestedId: string; question: string; isStale?: boolean };
@@ -25,193 +31,476 @@ function cosineSimilarity(vecA: number[], vecB: number[]): number {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-function formatWorkflowNote(task: any): string {
-  const path = task.intent_analysis?.chosen_path;
-  let note = "";
-  if (path === "LINEAR" && task.linear_flow) {
-    const flow = task.linear_flow;
-    note += `**Linear Flow**\n`;
-    if (flow.starter) note += `1. **Starter**: ${flow.starter}\n`;
-    if (flow.pre_actions?.length) note += `2. **Pre-actions**:\n   - ${flow.pre_actions.join('\n   - ')}\n`;
-    if (flow.core_execution?.length) note += `3. **Core Execution**:\n   - ${flow.core_execution.join('\n   - ')}\n`;
-    if (flow.post_actions?.length) note += `4. **Post-actions**:\n   - ${flow.post_actions.join('\n   - ')}\n`;
-  } else if (path === "DIMENSIONAL" && task.dimensional_flow) {
-    note += `**Dimensional Flow**\n`;
-    task.dimensional_flow.forEach((d: any) => {
-      note += `* **${d.dimension_name}**\n`;
-      if (d.sub_tasks?.length) {
-        note += `  - ${d.sub_tasks.join('\n  - ')}\n`;
-      }
-    });
-  } else {
-    note = "No detailed workflow generated.";
-  }
-  return note.trim();
+// ─────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────
+
+export type DecompositionType = "LINEAR" | "DIMENSIONAL";
+export type TaskScope = "small" | "medium" | "large";
+export type TaskUrgency = "today" | "this_week" | "open";
+
+export interface TaskFeatures {
+  has_deliverable: boolean;
+  scope: TaskScope;
+  domain: TaskIntent;           // maps directly to TaskIntent enum
+  urgency: TaskUrgency;
+  estimated_duration: number;   // minutes
+  title: string;                // cleaned canonical title
 }
 
-export const parseBrainDump = async (text: string, focusThemes: FocusTheme[] = [], iceboxTasks: Task[] = []): Promise<Partial<Task>[]> => {
-  if (!process.env.API_KEY) {
+export interface SkillsResult {
+  title: string;
+  intent: TaskIntent;
+  duration: number;
+  decomposition_type: DecompositionType;
+  workflowNote: string;
+}
+
+// ─────────────────────────────────────────────
+// Stage 1: Input Preprocessing (pure rules, no LLM)
+// ─────────────────────────────────────────────
+
+const FILLER_WORDS = [
+  "help me", "give me a hand", "I want to", "I need to", "need to do", "need to", "need to make a",
+  "make a", "write a", "put together a", "create a", "can I", "can", "please",
+  "trouble you to", "do me a favor to", "while you're at it"
+];
+
+const SYNONYM_MAP: Record<string, string> = {
+  "Competitor Research": "Competitor Analysis",
+  "Competitor Benchmarking": "Competitor Analysis",
+  "Benchmarking Analysis": "Competitor Analysis",
+  "Requirements Document": "PRD",
+  "Product Requirements Document": "PRD",
+  "Debrief Summary": "Debrief Report",
+  "Weekly Summary": "Weekly Report",
+  "Daily Summary": "Daily Report",
+  "Sort Out": "Organize",
+  "Go Through": "Sort Out",
+  "Brainstorm Ideas": "Creative Planning",
+  "Idea": "Plan",
+  "Check Out": "Research",
+};
+
+// Multi-task split signals: "顺便", "，", "另外", "还有", "以及"
+const MULTI_TASK_SPLITS = /,|;||in addition|also|as well as|then|after that/;
+
+export function preprocessInput(rawText: string): string[] {
+  // Step 1: Remove filler words
+  let cleaned = rawText;
+  for (const filler of FILLER_WORDS) {
+    cleaned = cleaned.replace(new RegExp(filler, "g"), "");
+  }
+
+  // Step 2: Apply synonym normalization
+  for (const [src, tgt] of Object.entries(SYNONYM_MAP)) {
+    cleaned = cleaned.replace(new RegExp(src, "g"), tgt);
+  }
+
+  // Step 3: Split multi-tasks
+  const parts = cleaned.split(MULTI_TASK_SPLITS)
+    .map(p => p.trim())
+    .filter(p => p.length > 2);
+
+  return parts.length > 0 ? parts : [cleaned.trim()];
+}
+
+// ─────────────────────────────────────────────
+// Stage 2: Feature Extraction (single LLM call)
+// ─────────────────────────────────────────────
+
+export async function extractFeatures(taskText: string): Promise<TaskFeatures> {
+  const intentValues = Object.values(TaskIntent).join(", ");
+
+  const prompt = `
+    You are a task analysis expert. Please analyze the following task text, extract 4 structured features, and return them as JSON in one go.
+
+    Task Text: "${taskText}"
+
+    Field Definitions:
+    - has_deliverable: Whether there is a clear deliverable output (specific outputs such as documents/reports/emails/code/PPT, etc.). true means there is a deliverable, false means it is a vague goal/broad direction.
+    - scope: Task scale —— "small"(1-2 hours), "medium"(half a day), "large"(multiple days/rounds)
+    - domain: The intent domain to which the task belongs, must be selected exactly from the following enumeration values: ${intentValues}
+    - urgency: Time urgency —— "today", "this_week", "open"
+    - estimated_duration: Estimated completion time (minutes), integer
+    - title: Refined standardized task title (4-12 words, remove colloquial expressions)
+
+    Judgment Rules (has_deliverable):
+    - Examples of true: "Write a competitor analysis report", "Send an email to Manager Zhang", "Update resume", "Submit code PR", "Prepare debrief PPT"
+    - Examples of false: "Improve workplace influence", "Learn English well", "Improve intimate relationships", "Prepare for postgraduate entrance exams", "Enhance physical fitness"
+    `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            has_deliverable: { type: Type.BOOLEAN },
+            scope: { type: Type.STRING, description: "small, medium, or large" },
+            domain: { type: Type.STRING, description: `One of: ${Object.values(TaskIntent).join(', ')}` },
+            urgency: { type: Type.STRING, description: "today, this_week, or open" },
+            estimated_duration: { type: Type.INTEGER },
+            title: { type: Type.STRING },
+          },
+          required: ["has_deliverable", "scope", "domain", "urgency", "estimated_duration", "title"],
+        },
+      },
+    });
+
+    return JSON.parse(response.text || "{}") as TaskFeatures;
+  } catch (e) {
+    console.error("Feature extraction failed:", e);
+    // Fallback defaults
+    return {
+      has_deliverable: true,
+      scope: "medium",
+      domain: TaskIntent.CAREER_BREAK,
+      urgency: "this_week",
+      estimated_duration: 60,
+      title: taskText.substring(0, 15),
+    };
+  }
+}
+
+// ─────────────────────────────────────────────
+// Stage 3: Skills Router (pure logic, zero latency)
+// ─────────────────────────────────────────────
+
+export interface SkillChainConfig {
+  path: DecompositionType;
+  domainPrompt: string;
+  scopeInstruction: string;
+}
+
+// Domain-specific prompt templates (from PRD)
+const DOMAIN_PROMPTS: Record<TaskIntent, string> = {
+  [TaskIntent.CAREER_BREAK]: `
+# Role: Expert-level Workplace Coach at Top Tech Companies
+# Domain Logic (Career):
+- Decomposition Focus: Emphasize the "Impact" and "Closure" of tasks
+- Linear Mode: Pre-action must include "Align Requirements/Obtain Data"; Post-action must include "Sync Progress/Document Results"
+- Dimensional Mode: Expand from three dimensions: "Business Contribution", "Self-Growth", "Workplace Relationships"
+# Tone: Extremely concise and result-driven`,
+
+  [TaskIntent.WEALTH_CONTROL]: `
+# Role: Senior Financial Planner
+# Domain Logic (Wealth):
+- Decomposition Focus: Emphasize "Objective Facts" over "Subjective Feelings"
+- Linear Mode: Pre-action must include "Reconcile Accounts/Obtain Current Prices"; Core must include "Logical Verification/Risk Assessment"
+- Dimensional Mode: Decompose from three dimensions: "Income & Expense Control", "Asset Allocation", "Risk Prevention"
+# Tone: Prudent, objective, and data-driven`,
+
+  [TaskIntent.BODY_MIND]: `
+# Role: Psychological Mediator & Energy Healer
+# Domain Logic (Body & Mind):
+- Decomposition Focus: Minimize Pre-action drastically and convert all steps into "Physical Actions"
+- Linear Mode: Starter must not involve electronic products (except for white noise); Core must emphasize breathing or physical movements
+- Dimensional Mode: Approach from three dimensions: "Environment Adjustment (Light/Sound)", "Physical Relaxation", "Mental Unloading"
+# Tone: Gentle, minimalist, and stress-free`,
+
+  [TaskIntent.ACADEMIC_SPRINT]: `
+# Role: Expert in Efficient Learning Strategies
+# Domain Logic (Academic):
+- Decomposition Focus: Lower the "Initiation Barrier" and materialize abstract knowledge
+- Linear Mode: Starter must be "Open a specific document/software"; Core must include the closed loop of "Understand - Internalize - Produce"
+- Dimensional Mode: Decompose from three dimensions: "Basic Input (Reading/Listening)", "In-depth Digestion (Practice/Writing)", "Review & Assessment"
+# Tone: Rigorous, structured, and highly guiding`,
+
+  [TaskIntent.DEEP_CONNECT]: `
+# Role: Interpersonal Relationship & Emotional Counselor
+# Domain Logic (Connection):
+- Decomposition Focus: Focus not only on "tasks" but also on "the other party's experience"
+- Linear Mode: Pre-action must include "Prepare Environment/Confirm the Other Party's Preferences"; Post-action must include "Emotional Feedback/Schedule Next Meeting"
+- Dimensional Mode: Expand from three dimensions: "Physical Environment Setup", "Communication Topic Design", "Emotional Value Provision"
+# Tone: Delicate, warm, and empathetic`,
+
+  [TaskIntent.INNER_WILD]: `
+# Role: Creative Director & Travel Explorer
+# Domain Logic (Spiritual):
+- Decomposition Focus: Abandon KPI-oriented approach and emphasize "Serendipity" and "Inspiration"
+- Linear Mode: Starter must be a "small observation that sparks curiosity"; Core emphasizes "Immersive Experience"
+- Dimensional Mode: Expand from three dimensions: "Sensory Exploration", "Creative Output", "Self-dialogue"
+# Tone: Romantic, divergent, and full of curiosity`,
+};
+
+const SCOPE_INSTRUCTIONS: Record<TaskScope, string> = {
+  small: "Small Task Scope (1-2 hours): Compress Pre-actions to a maximum of 1 item, strengthen the ultra-fast Starter (must be an action that can start within 30 seconds), and control the total steps to 3-4.",
+  medium: "Medium Task Scope (half a day): Standard decomposition depth, consisting of Starter + 2-3 Pre-actions + 2-3 Core steps + 1-2 Post-actions.",
+  large: "Large Task Scope (multiple days/rounds): Increase decomposition levels, generate a list of 2-3 sub-steps under each Core step, and mark the estimated time consumption and milestone nodes.",
+};
+
+export function skillsRouter(features: TaskFeatures): SkillChainConfig {
+  const path: DecompositionType = features.has_deliverable ? "LINEAR" : "DIMENSIONAL";
+  const domainPrompt = DOMAIN_PROMPTS[features.domain] || DOMAIN_PROMPTS[TaskIntent.CAREER_BREAK];
+  const scopeInstruction = SCOPE_INSTRUCTIONS[features.scope];
+
+  return { path, domainPrompt, scopeInstruction };
+}
+
+// ─────────────────────────────────────────────
+// Stage 4a: LINEAR Skill Chain Execution
+// Chain: DeliverableExtractor → BlockerIdentifier → LinearDecomposer
+// ─────────────────────────────────────────────
+
+async function executeLinearChain(
+  taskText: string,
+  features: TaskFeatures,
+  config: SkillChainConfig
+): Promise<string> {
+  const urgencyNote =
+    features.urgency === "today"
+      ? "Urgent Note: Must be completed today. The Starter must be the smallest physical action that can be immediately initiated within 2 minutes, with extremely low friction."
+      : features.urgency === "this_week"
+      ? "To be completed within this week. Arrange the pace reasonably."
+      : "Flexible timeline, allowing for in-depth planning.";
+
+  const prompt = `
+${config.domainPrompt}
+
+You are now executing the LINEAR skill chain and need to complete the following three atomic skills in sequence:
+
+## Skill 1: DeliverableExtractor
+Identify the core deliverables of the task, implicit acceptance criteria (who to send to/what format/deadline), and a clear definition of completion.
+
+## Skill 2: BlockerIdentifier  
+Scan the pre-dependencies of the task (items that must be completed first, otherwise progress cannot be made) and generate a list of pre_actions.
+
+## Skill 3: LinearDecomposer
+Assemble the complete workflow according to the following four-layer framework:
+- Starter: ${urgencyNote} (Format: Must include specific application name or operation object, e.g., "Open XX"/"Send to XX")
+- Pre-actions: Pre-impediment list (each item starts with "-")
+- Core execution: Core execution steps (each item starts with "-", each step has a clear deliverable)
+- Post-actions: Delivery/Closure/Closed-loop items (each item starts with "-")
+
+${config.scopeInstruction}
+
+Task: ${taskText}
+Task Title: ${features.title}
+
+Output Format (Directly output usable Markdown, no JSON wrapping):
+
+**${features.title}** · LINEAR
+
+**Starter (Immediate Action):**
+→ [Specific actionable task within 2 minutes]
+
+**Pre-actions (Preparations):**
+- [Preparatory item 1]
+- [Preparatory item 2] (Omit this layer if none)
+
+**Core execution (Core Implementation):**
+- [Step 1] → Deliverable: [Deliverable item]
+- [Step 2] → Deliverable: [Deliverable item]
+- [Step 3] → Deliverable: [Deliverable item]
+
+**Post-actions (Delivery & Closure):**
+- [Closure item 1]
+- [Closure item 2]
+`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: prompt,
+  });
+
+  return response.text?.trim() || "Workflow generation failed, please try again.";
+}
+
+// ─────────────────────────────────────────────
+// Stage 4b: DIMENSIONAL Skill Chain Execution
+// Chain: ObjectiveExtractor → DimensionMapper → DimensionalDecomposer
+// ─────────────────────────────────────────────
+
+async function executeDimensionalChain(
+  taskText: string,
+  features: TaskFeatures,
+  config: SkillChainConfig
+): Promise<string> {
+  const urgencyNote =
+    features.urgency === "today"
+      ? "Although initiated today, this is a long-term goal. The focus is to design the entry point for the first step this week."
+      : features.urgency === "this_week"
+      ? "Substantial progress must be made within this week, and the subtasks under each dimension must be executable this week."
+      : "Adequate time is available for comprehensive planning and in-depth expansion of each dimension.";
+
+  const prompt = `
+${config.domainPrompt}
+
+You are now executing the DIMENSIONAL skill chain and need to complete the following three atomic skills in sequence:
+
+## Skill 1: ObjectiveExtractor
+Extract from vague intentions:
+1. Core Objective (one-sentence description)
+2. Specific success criteria achievable within 3 months (quantifiable or perceptible change description, not vague expressions like "do better")
+
+## Skill 2: DimensionMapper (MECE Principle)
+Identify 3-5 mutually independent promotion dimensions, following these rules:
+- Each dimension represents a key leverage point for achieving the objective
+- No sequential dependencies between dimensions; they can be initiated in parallel
+- If the domain prompt specifies a particular dimensional framework, prioritize using that framework
+
+## Skill 3: DimensionalDecomposer
+Generate 2-3 specific subtasks executable this week under each dimension, with each subtask including:
+- Specific action description (starts with a verb)
+- Estimated time duration
+
+${config.scopeInstruction}
+${urgencyNote}
+
+Task: ${taskText}
+Task Title: ${features.title}
+
+Output Format (Directly output usable Markdown):
+
+**${features.title}** · DIMENSIONAL
+
+**Core Objective:** [One-sentence objective]
+**Success Criteria (3 months):** [Quantifiable/perceptible specific change]
+
+**Dimension 1: [Dimension Name]**
+- [Subtask 1] (Estimated: Xh)
+- [Subtask 2] (Estimated: Xh)
+
+**Dimension 2: [Dimension Name]**
+- [Subtask 1] (Estimated: Xh)
+- [Subtask 2] (Estimated: Xh)
+
+**Dimension 3: [Dimension Name]**
+- [Subtask 1] (Estimated: Xh)
+- [Subtask 2] (Estimated: Xh)
+`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: prompt,
+  });
+
+  return response.text?.trim() || "Dimensional decomposition generation failed, please try again.";
+}
+
+// ─────────────────────────────────────────────
+// Main Entry: processTaskWithSkills
+// Runs the complete pipeline for a single task text
+// ─────────────────────────────────────────────
+
+export async function processTaskWithSkills(
+  taskText: string,
+  focusThemes: FocusTheme[] = []
+): Promise<SkillsResult> {
+  // Stage 2: Feature extraction (single LLM call)
+  const features = await extractFeatures(taskText);
+
+  // Override domain with focus themes if alignment is strong
+  if (focusThemes.length > 0) {
+    try {
+      const targetStrings = focusThemes.map(theme => 
+        `[${theme.intent}] The core foucs dimensions：${(theme.tags || []).join(', ')}`
+      );
+      const taskString = `task：${features.title}。`;
+      const allStrings = [...targetStrings, taskString];
+      
+      const embedResult = await ai.models.embedContent({
+        model: 'gemini-embedding-3-preview',
+        contents: allStrings,
+      });
+      
+      const embeddings = embedResult.embeddings;
+      if (embeddings && embeddings.length === allStrings.length) {
+        const targetEmbeddings = embeddings.slice(0, targetStrings.length).map(e => e.values);
+        const taskVec = embeddings[embeddings.length - 1].values;
+        
+        let bestScore = -1;
+        let bestThemeIdx = -1;
+
+        targetEmbeddings.forEach((targetVec, tIdx) => {
+          if (taskVec && targetVec) {
+            const score = cosineSimilarity(taskVec, targetVec);
+            if (score > bestScore) {
+              bestScore = score;
+              bestThemeIdx = tIdx;
+            }
+          }
+        });
+
+        if (bestScore >= 0.45 && bestThemeIdx !== -1) {
+          features.domain = focusThemes[bestThemeIdx].intent;
+        }
+      }
+    } catch (e) {
+      console.error("Embedding alignment failed", e);
+    }
+  }
+
+  // Stage 3: Route (zero latency)
+  const config = skillsRouter(features);
+
+  // Stage 4: Execute skill chain
+  let workflowNote: string;
+  if (config.path === "LINEAR") {
+    workflowNote = await executeLinearChain(taskText, features, config);
+  } else {
+    workflowNote = await executeDimensionalChain(taskText, features, config);
+  }
+
+  return {
+    title: features.title,
+    intent: features.domain,
+    duration: features.estimated_duration,
+    decomposition_type: config.path,
+    workflowNote,
+  };
+}
+
+export const parseBrainDump = async (text: string, focusThemes: FocusTheme[] = [], iceboxTasks: Task[] = [], userProfile?: UserProfile): Promise<Partial<Task>[]> => {
+  if (!process.env.GEMINI_API_KEY) {
     console.warn("No API Key provided, returning mock data");
     return mockParse(text);
   }
 
   try {
-    const model = ai.models;
-    const iceboxContext = iceboxTasks.length > 0 
-      ? `Existing Icebox Tasks (Frozen): ${JSON.stringify(iceboxTasks.map(t => ({ id: t.id, title: t.title, intent: t.intent })))}` 
-      : "No Icebox Tasks.";
+    // Stage 1: Preprocess input
+    const taskTexts = preprocessInput(text);
+    
+    // Process all tasks in parallel
+    const skillsResults = await Promise.all(
+      taskTexts.map(taskText => processTaskWithSkills(taskText, focusThemes))
+    );
 
-    const prompt = `
-      # Role
-      You are a senior efficiency expert, skilled at transforming vague intentions into highly certain execution paths. You are proficient in managing OKRs in large companies and in the growth pathways of senior students (job seeking/graduate school preparation).
-
-      # Task
-      Analyze the user's raw task input (Brain Dump) and complete the following:
-      1. **Task Aggregation**: Combine actions pointing to the same deliverable or workflow into a comprehensive task (COMPOSITE task). If the input contains multiple independent tasks, extract them separately.
-      2. **Entity Recognition**: Identify the core verbs, deliverables, collaborators, and deadlines present in the task.
-      3. **Path Selection Logic**:
-      - Path A (LINEAR): Choose this path if the task is a **definite deliverable** (e.g., writing a document, updating a resume, sending an email) with a clear sequential execution logic. The decomposition rules for Path A:
-        1. Must include a Starter that can be initiated within 2 minutes (extremely low friction).
-        2. Identify all necessary Pre-actions (blocking items that must be completed first).
-        3. Extract the Core action (main execution step).
-        4. Define Post-actions (delivery/closure items).
-      - Path B (DIMENSIONAL): Choose this path if the task is a **broad objective/area** (e.g., preparing for graduate school, autumn job hunt, leadership improvement) that requires effort across multiple independent dimensions.
-      4. **Semantic Deduplication**: Check whether the new task semantically matches existing Icebox tasks.
-      - If highly similar, return the existing Icebox task's ID in the 'id' field and set 'isRevived' to true.
-      - If the new input adds details, update the title; otherwise, keep it unchanged.
-      - If not similar, generate a new UUID.
-      5. **Assign Intent**: Assign the most relevant intent from [${Object.values(TaskIntent).join(", ")}] as a fallback.
-      6. **Estimated Duration**: Estimate task duration in minutes (default 30).
-
-      # Rules
-      - Starter must be an extremely low-friction action that can be started within 2 minutes.
-      - Avoid empty talk; action descriptions must be as specific as 'open XX, send XX, check XX'.
-      - Language style: concise, professional.
-
-      User Input: "${text}"
-      ${iceboxContext}
-      `;
-
-    const response = await model.generateContent({
-      model: 'gemini-3.1-flash-preview',
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              id: { type: Type.STRING, description: "New UUID or Existing Icebox ID if revived" },
-              title: { type: Type.STRING },
-              intent: { type: Type.STRING, enum: Object.values(TaskIntent) },
-              duration: { type: Type.INTEGER },
-              isRevived: { type: Type.BOOLEAN },
-              intent_analysis: {
-                type: Type.OBJECT,
-                properties: {
-                  entities: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Identified collaborators, tools, deadlines" },
-                  chosen_path: { type: Type.STRING, enum: ["LINEAR", "DIMENSIONAL"], description: "Determine whether the task belongs to a linear flow or a dimensional flow" },
-                  reason: { type: Type.STRING, description: "The logical basis for choosing this path" }
-                },
-                required: ["chosen_path"]
-              },
-              linear_flow: {
-                type: Type.OBJECT,
-                properties: {
-                  starter: { type: Type.STRING, description: "Startup items within 2 minutes" },
-                  pre_actions: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Prerequisite dependency" },
-                  core_execution: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Core execution step" },
-                  post_actions: { type: Type.ARRAY, items: { type: Type.STRING }, description: "后续闭环项" }
-                }
-              },
-              dimensional_flow: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    dimension_name: { type: Type.STRING, description: "When the user's input intention is vague and abstract, you need to break it down into different sub-dimensions that are related to this task or can achieve the outcomes of this task." },
-                    sub_tasks: { type: Type.ARRAY, items: { type: Type.STRING } }
-                  }
-                }
-              }
-            },
-            required: ["title", "intent", "duration", "intent_analysis"]
-          }
-        }
+    // Map to Partial<Task>
+    return skillsResults.map(result => {
+      // Basic deduplication against icebox (can be enhanced later)
+      let isRevived = false;
+      let id = generateId();
+      
+      const similarIceboxTask = iceboxTasks.find(t => 
+        t.title.toLowerCase().includes(result.title.toLowerCase()) || 
+        result.title.toLowerCase().includes(t.title.toLowerCase())
+      );
+      
+      if (similarIceboxTask) {
+        id = similarIceboxTask.id;
+        isRevived = true;
       }
+
+      return {
+        id,
+        title: result.title,
+        intent: result.intent,
+        category: mapIntentToCategory(result.intent),
+        workflowNote: result.workflowNote,
+        duration: result.duration,
+        decomposition_type: result.decomposition_type,
+        status: TaskStatus.CANDIDATE,
+        isAnchor: false,
+        isFrozen: false,
+        isRevived,
+        completed: false
+      };
     });
-
-    const rawTasks = JSON.parse(response.text || "[]");
-
-    // --- Target Alignment using Embeddings ---
-    if (focusThemes.length > 0 && rawTasks.length > 0) {
-      try {
-        const targetStrings = focusThemes.map(theme => 
-          `[${theme.intent}] The core foucs dimensions：${(theme.tags || []).join(', ')}`
-        );
-        
-        const taskStrings = rawTasks.map((t: any) => {
-          const path = t.intent_analysis?.chosen_path;
-          let coreActionsStr = "";
-          if (path === "LINEAR" && t.linear_flow?.core_execution) {
-            coreActionsStr = t.linear_flow.core_execution.join("；");
-          } else if (path === "DIMENSIONAL" && t.dimensional_flow) {
-            coreActionsStr = t.dimensional_flow.map((d: any) => d.sub_tasks?.join("；")).join("；");
-          }
-          return `task：${t.title}。actions：${coreActionsStr}`;
-        });
-
-        const allStrings = [...targetStrings, ...taskStrings];
-        const embedResult = await ai.models.embedContent({
-          model: 'gemini-embedding-2-preview',
-          contents: allStrings,
-        });
-        
-        const embeddings = embedResult.embeddings;
-        if (embeddings && embeddings.length === allStrings.length) {
-          const targetEmbeddings = embeddings.slice(0, targetStrings.length).map(e => e.values);
-          const taskEmbeddings = embeddings.slice(targetStrings.length).map(e => e.values);
-
-          rawTasks.forEach((t: any, idx: number) => {
-            const taskVec = taskEmbeddings[idx];
-            let bestScore = -1;
-            let bestThemeIdx = -1;
-
-            targetEmbeddings.forEach((targetVec, tIdx) => {
-              if (taskVec && targetVec) {
-                const score = cosineSimilarity(taskVec, targetVec);
-                if (score > bestScore) {
-                  bestScore = score;
-                  bestThemeIdx = tIdx;
-                }
-              }
-            });
-
-            // If alignment score is high enough, override the fallback intent
-            if (bestScore >= 0.45 && bestThemeIdx !== -1) {
-              t.intent = focusThemes[bestThemeIdx].intent;
-            }
-          });
-        }
-      } catch (e) {
-        console.error("Embedding alignment failed", e);
-      }
-    }
-
-    return rawTasks.map((t: any) => ({
-      id: t.id || generateId(),
-      title: t.title,
-      intent: t.intent as TaskIntent,
-      category: mapIntentToCategory(t.intent as TaskIntent),
-      workflowNote: formatWorkflowNote(t),
-      duration: t.duration,
-      status: TaskStatus.CANDIDATE,
-      isAnchor: false,
-      isFrozen: false,
-      isRevived: t.isRevived || false,
-      completed: false
-    }));
 
   } catch (error) {
     console.error("Gemini API Error:", error);
@@ -246,7 +535,7 @@ export const generateFunnelScript = async (
   currentTime: string,
   iceboxTasks: Task[] = []
 ): Promise<FunnelScript> => {
-  if (!process.env.API_KEY) return mockFunnelScript(isSubsequent, candidateTasks, existingAnchors);
+  if (!process.env.GEMINI_API_KEY) return mockFunnelScript(isSubsequent, candidateTasks, existingAnchors);
 
   const candidateJson = JSON.stringify(candidateTasks.map(t => ({ id: t.id, title: t.title, isRevived: t.isRevived })));
   const anchorJson = JSON.stringify(existingAnchors.map(t => ({ id: t.id, title: t.title })));
@@ -442,7 +731,7 @@ export const semanticLeafMerge = async (
   focusThemes: FocusTheme[],
   quarterId?: string
 ): Promise<{ action: 'MERGE' | 'CREATE'; targetLeafId?: string; canonicalTitle?: string }> => {
-  if (!process.env.API_KEY) {
+  if (!process.env.GEMINI_API_KEY) {
     return { action: 'CREATE', canonicalTitle: completedTaskTitle.substring(0, 4) };
   }
 
@@ -456,26 +745,26 @@ export const semanticLeafMerge = async (
 
     const prompt = `
 # Role
-你是一位精通语义分析与个人效能管理的“森林园丁”。你的任务是接收用户完成的新任务，并决定它是该合并到现有的“任务叶片”中，还是作为一个新叶片生长。
+You are a "Forest Gardener" proficient in semantic analysis and personal productivity management. Your task is to receive the new task completed by the user and decide whether it should be merged into an existing "task leaf" or grown as a new leaf.
 
 ### Input
-- 现有叶子节点列表: ${existingLeafJson}
-- 新完成任务标题: "${completedTaskTitle}"
-- 所属意图类别: ${currentIntent || '未分类'}
+- Existing leaf node list: ${existingLeafJson}
+- New completed task title: "${completedTaskTitle}"
+- Associated intent category: ${currentIntent || 'Uncategorized'}
 
 # Rules
-- 合并判定：如果新任务是现有叶片的【子步骤】、【不同阶段】（如：初稿与定稿）或【语义近义词】，则执行 MERGE。
-- 区分判定：如果任务属于同一项目但性质完全不同（如：写代码与招募测试员），则执行 CREATE。
-- 命名规范：对于 CREATE，生成一个 2-4 字的、抽象且具有美感的“叶片名称”。
-- 输出 JSON:
+- Merge determination: If the new task is a [sub-step], [different stage] (e.g., first draft vs. final version), or [semantic synonym] of an existing leaf, execute MERGE.
+- Differentiation determination: If the task belongs to the same project but is completely different in nature (e.g., writing code vs. recruiting testers), execute CREATE.
+- Naming convention: For CREATE, generate an abstract and aesthetically pleasing "leaf name" with 2-4 characters.
+- Output JSON:
    {
      "action": "MERGE" | "CREATE",
-     "targetLeafId": "string (如果是MERGE)",
-     "canonicalTitle": "string (如果是CREATE，提供一个2-4字的精简名称)"
+     "targetLeafId": "string (required if MERGE)",
+     "canonicalTitle": "string (provide a concise 2-4 character name if CREATE)"
    }
 
 # Intent Context
-用户当前聚焦的 3 大意图：${themesString}
+User's current 3 key focus intents: ${themesString}
     `;
 
     const response = await ai.models.generateContent({
@@ -514,12 +803,12 @@ export const generateQuarterlyReview = async (
   synergyLinks: SynergyLink[],
   focusThemes: FocusTheme[]
 ): Promise<string> => {
-  if (!process.env.API_KEY) {
-    return "本季度你的“职业破局”已结出果实，但生态略显失衡。我注意到你将“架构设计”连接到了“身心修复”，这种高质量的深度工作确实为你换来了更好的内心平静。下个月，试着给财富之树多浇点水吧。";
+  if (!process.env.GEMINI_API_KEY) {
+    return "Your \"Career Breakthrough\" has borne fruit this quarter, but the ecosystem is slightly unbalanced. I noticed you connected \"Architectural Design\" to \"Physical and Mental Restoration\" – this high-quality deep work has indeed brought you greater inner peace. Next month, try watering the Tree of Wealth a little more.";
   }
 
   try {
-    const forestContext = forest.map(l => `${l.canonicalTitle} (${l.intent}): ${l.count}次`).join(', ');
+    const forestContext = forest.map(l => `${l.canonicalTitle} (${l.intent}): ${l.count} times`).join(', ');
     const linksContext = synergyLinks.map(l => {
       const source = forest.find(f => f.id === l.sourceLeafId);
       return source ? `${source.canonicalTitle} -> ${l.targetIntent}` : '';
@@ -528,20 +817,20 @@ export const generateQuarterlyReview = async (
 
     const prompt = `
 # Role
-你是一位具有哲学深度和行为心理学背景的“人生教练”。请基于用户本季度的“意图森林”生态数据，撰写一份极具启发性的《季度生态审计报告》。
+You are a "Life Coach" with philosophical depth and a background in behavioral psychology. Based on the ecological data of the user's "Intent Forest" for the quarter, write a highly insightful "Quarterly Ecological Audit Report".
 
 # Data
-- 聚焦主题: ${themesContext}
-- 森林叶片 (任务及完成次数): ${forestContext}
-- 跨树连线 (复利效应): ${linksContext}
+- Focus Themes: ${themesContext}
+- Forest Leaves (tasks and completion counts): ${forestContext}
+- Cross-Tree Links (compound effect): ${linksContext}
 
 # Analysis Dimensions
-1. 生态多样性：三棵核心意图树的生长比例是否失衡？
-2. 复利效应：分析用户手动建立的【跨意图连线】，指出哪些行为产生了跨领域的正向影响。
-3. 熵增预警：分析数据，指出用户的心理阻碍点或需要改进的地方。
+1. Ecological Diversity: Is the growth ratio of the three core intent trees unbalanced?
+2. Compound Effect: Analyze the [cross-intent links] manually established by the user and identify which behaviors have produced positive cross-domain impacts.
+3. Entropy Increase Warning: Analyze the data to identify the user's psychological obstacles or areas that need improvement.
 
 # Tone
-语气要温暖、睿智、具有洞察力，避免冷冰冰的报表感。字数控制在150字左右。
+The tone should be warm, wise, and insightful, avoiding a cold, rigid report-like feel. Keep the word count around 150 words.
     `;
 
     const response = await ai.models.generateContent({
@@ -549,14 +838,51 @@ export const generateQuarterlyReview = async (
       contents: prompt,
     });
 
-    return response.text?.trim() || "暂无报告";
+    return response.text?.trim() || "No report available";
   } catch (error) {
     console.error("AI Quarterly Review Error:", error);
-    return "AI 季度报告生成失败，请稍后再试。";
+    return "AI quarterly report generation failed, please try again later.";
   }
 };
+
+export const generateDomainsForRole = async (roleLabel: string): Promise<string[]> => {
+  if (!process.env.GEMINI_API_KEY) {
+    return ['Product Manager', 'Software Engineer', 'Designer', 'Data Analyst', 'Marketing'];
+  }
+
+  try {
+    const prompt = `
+      You are an expert career advisor.
+      The user has selected the role: "${roleLabel}".
+      Please generate a list of 6-8 popular, specific job titles or domains associated with this role.
+      Output ONLY a JSON array of strings. Do not include markdown formatting or any other text.
+      Example: ["Growth PM", "Operations", "Marketing", "Data Analyst"]
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.STRING
+          }
+        }
+      }
+    });
+
+    const domains = JSON.parse(response.text || "[]");
+    return domains.length > 0 ? domains : ['Product Manager', 'Software Engineer', 'Designer', 'Data Analyst', 'Marketing'];
+  } catch (error) {
+    console.error("Gemini API Error (generateDomainsForRole):", error);
+    return ['Product Manager', 'Software Engineer', 'Designer', 'Data Analyst', 'Marketing'];
+  }
+};
+
 export const generateFocusTags = async (intent: TaskIntent, recentTasks: Task[]): Promise<string[]> => {
-  if (!process.env.API_KEY) return [];
+  if (!process.env.GEMINI_API_KEY) return [];
 
   try {
     const taskContext = recentTasks.length > 0 

@@ -5,7 +5,7 @@ import {
   Check, AlertCircle, TrendingUp, Clock, Snowflake, ChevronDown 
 } from 'lucide-react';
 import { parseBrainDump, generateFunnelScript, FunnelScript } from '../services/geminiService';
-import { Task, TaskCategory, TaskStatus, FunnelStep } from '../types';
+import { Task, TaskCategory, TaskStatus, FunnelStep, UserProfile } from '../types';
 import { format } from 'date-fns';
 import { useUserStore } from '../store/useUserStore';
 import TaskCard from './TaskCard';
@@ -14,9 +14,10 @@ import { generateId } from '../utils/helpers';
 interface Props {
   onTasksGenerated: (tasks: Task[]) => void;
   existingTasks?: Task[]; // To detect subsequent mode and existing anchors
+  userProfile?: UserProfile;
 }
 
-const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) => {
+const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [], userProfile }) => {
   // Input State
   const [input, setInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -50,52 +51,59 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [] }) 
     if (!input.trim()) return;
     setIsProcessing(true);
     
-    // Get Icebox Tasks (Frozen tasks from store)
-    const currentIcebox = allTasks.filter(t => t.isFrozen);
-    setIceboxTasks(currentIcebox);
+    try {
+      // Get Icebox Tasks (Frozen tasks from store)
+      const currentIcebox = (allTasks || []).filter(t => t.isFrozen);
+      setIceboxTasks(currentIcebox);
 
-    const tasks = await parseBrainDump(input, focusThemes, currentIcebox);
-    
-    // Check for revived tasks
-    const revivedTasks = tasks.filter(t => t.isRevived);
-    if (revivedTasks.length > 0) {
-        const revivedNames = revivedTasks.map(t => t.title).join(', ');
-        setShowToast({ 
-            message: `Detected duplicate intent, revived icebox task(s): ${revivedNames} 🪄`, 
-            visible: true 
-        });
-        setTimeout(() => setShowToast({ message: '', visible: false }), 4000);
-    }
+      const tasks = await parseBrainDump(input, focusThemes || [], currentIcebox, userProfile);
+      
+      // Check for revived tasks
+      const revivedTasks = tasks.filter(t => t.isRevived);
+      if (revivedTasks.length > 0) {
+          const revivedNames = revivedTasks.map(t => t.title).join(', ');
+          setShowToast({ 
+              message: `Detected duplicate intent, revived icebox task(s): ${revivedNames} 🪄`, 
+              visible: true 
+          });
+          setTimeout(() => setShowToast({ message: '', visible: false }), 4000);
+      }
 
-    const fullTasks = tasks.map(t => ({
-      ...t,
-      id: t.id || generateId(),
-      status: TaskStatus.CANDIDATE, // Start as Candidate
-      isAnchor: false,
-      isFrozen: false, // Revived ones are un-frozen
-      startTime: undefined
-    })) as Task[];
+      const fullTasks = tasks.map(t => ({
+        ...t,
+        id: t.id || generateId(),
+        status: TaskStatus.CANDIDATE, // Start as Candidate
+        isAnchor: false,
+        isFrozen: false, // Revived ones are un-frozen
+        startTime: undefined
+      })) as Task[];
 
-    setGeneratedTasks(fullTasks);
-    setIsProcessing(false);
-    setStage('preview');
+      setGeneratedTasks(fullTasks);
+      setIsProcessing(false);
+      setStage('preview');
 
-    // Trigger Logic
-    const existingAnchors = existingTasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
-    const unfinishedAnchors = existingAnchors.filter(t => !t.completed);
-    
-    const isSubsequent = existingTasks.length > 0; 
-    setIsSubsequentMode(isSubsequent);
+      // Trigger Logic
+      const existingAnchors = (existingTasks || []).filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
+      const unfinishedAnchors = existingAnchors.filter(t => !t.completed);
+      
+      const isSubsequent = (existingTasks || []).length > 0; 
+      setIsSubsequentMode(isSubsequent);
 
-    const totalCount = fullTasks.length + (isSubsequent ? unfinishedAnchors.length : 0);
+      const totalCount = fullTasks.length + (isSubsequent ? unfinishedAnchors.length : 0);
 
-    // If we have icebox tasks, we might want to trigger funnel even if count < 4? 
-    // Prompt says: "When system organizes input x >= 4 ... AND when system finds icebox tasks..."
-    // So condition is still >= 4.
-    if (totalCount >= 4) {
-      setShowFilterModal(true);
-    } else {
-      setUseFunnel(false);
+      // If we have icebox tasks, we might want to trigger funnel even if count < 4? 
+      // Prompt says: "When system organizes input x >= 4 ... AND when system finds icebox tasks..."
+      // So condition is still >= 4.
+      if (totalCount >= 4) {
+        setShowFilterModal(true);
+      } else {
+        setUseFunnel(false);
+      }
+    } catch (error) {
+      console.error("Error in handleProcess:", error);
+      setIsProcessing(false);
+      setShowToast({ message: "An error occurred while processing tasks.", visible: true });
+      setTimeout(() => setShowToast({ message: '', visible: false }), 4000);
     }
   };
 

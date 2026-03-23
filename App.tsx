@@ -224,6 +224,7 @@ const App: React.FC = () => {
           <FocusFunnel 
             onTasksGenerated={handleTasksGenerated} 
             existingTasks={visibleTasks}
+            userProfile={state.userProfile}
           />
         );
       case Tab.TIMELINE:
@@ -249,6 +250,7 @@ const App: React.FC = () => {
           <FocusFunnel 
             onTasksGenerated={handleTasksGenerated} 
             existingTasks={visibleTasks}
+            userProfile={state.userProfile}
           />
         );
     }

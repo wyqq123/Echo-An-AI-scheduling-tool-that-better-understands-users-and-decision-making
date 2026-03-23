@@ -2,6 +2,7 @@ import React from 'react';
 import { Task, TaskIntent, TaskCategory } from '../types';
 import IntentPillBar from './IntentPillBar';
 import { StickyNote, ChevronRight, Clock } from 'lucide-react';
+import Markdown from 'react-markdown';
 
 interface TaskCardProps {
   task: Task;
@@ -41,6 +42,11 @@ const TaskCard: React.FC<TaskCardProps> = ({ task, onUpdate }) => {
           placeholder="Task Title"
         />
         <div className="flex items-center gap-2 shrink-0">
+             {task.decomposition_type && (
+               <div className={`text-[10px] uppercase font-bold px-2 py-1 rounded-md ${task.decomposition_type === 'LINEAR' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'}`}>
+                 {task.decomposition_type}
+               </div>
+             )}
              <div className="flex items-center gap-1 bg-slate-800 px-2 py-1 rounded-lg text-xs text-slate-400">
                 <Clock size={12} />
                 <input 
@@ -58,8 +64,8 @@ const TaskCard: React.FC<TaskCardProps> = ({ task, onUpdate }) => {
       {task.workflowNote && (
         <div className="flex gap-2 p-3 bg-white/5 rounded-2xl mb-4 border border-white/5">
           <StickyNote size={14} className="text-slate-500 mt-1 flex-shrink-0" />
-          <div className="text-sm text-slate-400 leading-relaxed whitespace-pre-line">
-            {task.workflowNote}
+          <div className="text-sm text-slate-400 leading-relaxed markdown-body">
+            <Markdown>{task.workflowNote}</Markdown>
           </div>
         </div>
       )}

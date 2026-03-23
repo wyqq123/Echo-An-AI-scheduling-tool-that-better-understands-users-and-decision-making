@@ -58,6 +58,7 @@ export interface Task {
   isArchived?: boolean; // New field for daily reset
   completed: boolean;
   duration: number; // in minutes
+  decomposition_type?: "LINEAR" | "DIMENSIONAL"; // New field for skills routing
   startTime?: string; // HH:MM
   dateStr?: string; // YYYY-MM-DD
   dayOffset?: number; // Deprecated, use dateStr
@@ -94,6 +95,8 @@ export interface UserProfile {
   name: string;
   avatar?: string;
   quarterlyThemes: FocusTheme[];
+  identity?: string | null;
+  domain?: string;
 }
 
 export interface FocusTheme {

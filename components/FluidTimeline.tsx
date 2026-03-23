@@ -787,6 +787,11 @@ const FluidTaskCard: React.FC<CardProps> = ({ task, onToggle, onMouseDown, onCon
             <div className={`flex items-center gap-2 mt-0.5 ${task.completed ? 'opacity-50' : 'opacity-80'}`}>
               <span className="text-[9px] font-mono text-white/80">{task.startTime}</span>
               <span className="text-[9px] px-1 rounded bg-black/20 text-white/80">{task.duration}m</span>
+              {task.decomposition_type && (
+                <span className={`text-[8px] px-1 rounded font-bold ${task.decomposition_type === 'LINEAR' ? 'bg-blue-500/30 text-blue-200' : 'bg-purple-500/30 text-purple-200'}`}>
+                  {task.decomposition_type.substring(0, 3)}
+                </span>
+              )}
               {task.workflowNote && <FileText size={9} className="text-white/70" />}
             </div>
          </div>

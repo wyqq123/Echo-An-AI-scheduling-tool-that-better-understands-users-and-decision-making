@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronRight, Sparkles, User, ArrowRight, Check } from 'lucide-react';
+import { parseBrainDump, generateFunnelScript, FunnelScript, generateDomainsForRole } from '../services/geminiService';
+import { Loader2, ChevronRight, Sparkles, User, ArrowRight, Check } from 'lucide-react';
 import { UserProfile, FocusTheme, TaskIntent } from '../types';
 import { useUserStore } from '../store/useUserStore';
 
@@ -16,7 +17,14 @@ const DOMAINS = [
   { id: 'spirit', icon: '🎨', title: 'Inner Wild', desc: 'Hobbies, Travel, Creativity', options: ['Explore Unknown Places', 'Cultivate New Hobby', 'Creative Expression'] },
 ];
 
-type Step = 'profile' | 'prompt' | 'skip_modal' | 'select_domains' | 'refine_domains' | 'preview' | 'completed';
+type Step = 'profile' | 'identity' | 'domain' | 'prompt' | 'skip_modal' | 'select_domains' | 'refine_domains' | 'preview' | 'completed';
+
+const ROLES = [
+  { id: 'Student', label: '深度求学者', icon: '🎓', sub: ['本科生', '研究生', '考研党', '求职者', '终身学习者'] },
+  { id: 'Professional', label: '职场多面手', icon: '💼', sub: ['产品经理', '研发工程师', '设计/创意', '金融/法律', '数据分析师', '产品运营/增长', '营销/市场'] },
+  { id: 'Freelancer', label: '独立创造者', icon: '🎨', sub: ['独立开发者', '自媒体', '咨询顾问', '自由译者'] },
+  { id: 'Mixed', label: '模糊状态', icon: '🌫️', sub: ['探索中', '斜杠青年', '转型期'] }
+];
 
 interface EchoOnboardingProps {
   onComplete: (profile: UserProfile) => void;
@@ -27,10 +35,38 @@ export default function EchoOnboarding({ onComplete }: EchoOnboardingProps) {
   
   // State Collection
   const [name, setName] = useState('');
+  const [identity, setIdentity] = useState<string | null>(null);
+  const [domain, setDomain] = useState<string>('');
+  const [dynamicDomains, setDynamicDomains] = useState<string[]>([]);
+  const [isGeneratingDomains, setIsGeneratingDomains] = useState(false);
   const [selectedDomainIds, setSelectedDomainIds] = useState<string[]>([]);
   const [refinedFocus, setRefinedFocus] = useState<Record<string, string>>({});
 
   // --- Interaction Handlers ---
+  const handleSelectIdentity = async (id: string, label: string) => {
+    setIdentity(id);
+    setStep('domain');
+    setIsGeneratingDomains(true);
+    
+    // Set fallback immediately
+    const role = ROLES.find(r => r.id === id);
+    if (role) {
+      setDynamicDomains(role.sub);
+    }
+
+    // Generate dynamic domains
+    const generated = await generateDomainsForRole(label);
+    if (generated && generated.length > 0) {
+      setDynamicDomains(generated);
+    }
+    setIsGeneratingDomains(false);
+  };
+
+  const handleSelectDomain = (domainStr: string) => {
+    setDomain(domainStr);
+    setStep('prompt');
+  };
+
   const toggleDomain = (id: string) => {
     setSelectedDomainIds(prev => {
       if (prev.includes(id)) return prev.filter(d => d !== id);
@@ -61,7 +97,9 @@ export default function EchoOnboarding({ onComplete }: EchoOnboardingProps) {
 
     const profile: UserProfile = {
       name,
-      quarterlyThemes: themes
+      quarterlyThemes: themes,
+      identity,
+      domain
     };
     
     onComplete(profile);
@@ -74,7 +112,9 @@ export default function EchoOnboarding({ onComplete }: EchoOnboardingProps) {
 
     const profile: UserProfile = {
       name: name || 'Traveler',
-      quarterlyThemes: []
+      quarterlyThemes: [],
+      identity,
+      domain
     };
     onComplete(profile);
   };
@@ -122,11 +162,81 @@ export default function EchoOnboarding({ onComplete }: EchoOnboardingProps) {
               />
               <button 
                 disabled={!name.trim()}
-                onClick={() => setStep('prompt')}
+                onClick={() => setStep('identity')}
                 className="mt-12 w-full py-4 bg-slate-50 text-slate-950 rounded-2xl font-bold text-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-white hover:scale-[1.02] active:scale-[0.98] transition-all shadow-lg shadow-indigo-500/10"
               >
                 Next
               </button>
+            </motion.div>
+          )}
+
+          {/* Step 1.5: Identity Selection */}
+          {step === 'identity' && (
+            <motion.div 
+              key="identity"
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="flex flex-col items-center text-center w-full max-w-2xl mx-auto"
+            >
+              <h2 className="text-2xl font-light mb-8 text-slate-300">FocusFunnel 需要了解你的“重力场”。你是？</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
+                {ROLES.map((role) => (
+                  <button
+                    key={role.id}
+                    onClick={() => handleSelectIdentity(role.id, role.label)}
+                    className="p-6 rounded-3xl border border-white/10 bg-slate-900/50 hover:bg-slate-800 transition-all group text-left flex items-center gap-4"
+                  >
+                    <span className="text-4xl">{role.icon}</span>
+                    <div>
+                      <h3 className="text-lg font-medium text-slate-100">{role.label}</h3>
+                      <p className="text-xs text-slate-500 mt-1">{role.sub.slice(0, 3).join(', ')}...</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          )}
+
+          {/* Step 1.6: Domain Selection */}
+          {step === 'domain' && (
+            <motion.div 
+              key="domain"
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="flex flex-col items-center text-center w-full max-w-xl mx-auto"
+            >
+              <h2 className="text-2xl font-light mb-6 text-slate-300">告诉 FocusFunnel 你的具体坐标</h2>
+              <div className="flex flex-wrap gap-3 justify-center min-h-[120px] items-center">
+                {isGeneratingDomains && dynamicDomains.length === 0 ? (
+                  <div className="flex items-center gap-2 text-indigo-400">
+                    <Loader2 className="animate-spin" size={20} />
+                    <span className="text-sm">正在生成领域标签...</span>
+                  </div>
+                ) : (
+                  dynamicDomains.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => handleSelectDomain(s)}
+                      className="px-6 py-3 rounded-full border border-indigo-500/30 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 transition-all"
+                    >
+                      {s}
+                    </button>
+                  ))
+                )}
+                <input 
+                  placeholder="或者手动输入你的职位/领域..."
+                  className="w-full mt-6 bg-transparent border-b border-slate-700 p-3 text-center outline-none focus:border-indigo-500 text-slate-200"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+                      handleSelectDomain(e.currentTarget.value.trim());
+                    }
+                  }}
+                />
+              </div>
             </motion.div>
           )}
 
