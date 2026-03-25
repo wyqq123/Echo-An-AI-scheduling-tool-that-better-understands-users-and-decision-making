@@ -1,15 +1,78 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Task, TaskCategory, FunnelStep, TaskStatus, LeafNode, TaskIntent, FocusTheme, SynergyLink, UserProfile } from "../types";
 import { generateId } from "../utils/helpers";
+import { SKILL, fillTemplate } from "../utils/skillLoader";
 
 // Initialize Gemini
 // Important: the @google/genai web client throws if no API key is provided.
 // We must avoid constructing the client at module-load time when running in browser without a key,
 // otherwise it will crash the whole React app before the UI can render.
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const isBrowser = typeof window !== 'undefined';
+const GEMINI_API_KEY =
+  !isBrowser && typeof process !== 'undefined'
+    ? process.env.GEMINI_API_KEY
+    : undefined;
+
 const ai = GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: GEMINI_API_KEY })
   : (null as unknown as GoogleGenAI);
+
+async function generateViaProxyOrDirect(params: {
+  model: string;
+  contents: string | string[];
+  config?: any;
+}): Promise<{ text?: string }> {
+  if (isBrowser) {
+    const res = await fetch("/api/gemini/generate-content", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`Proxy generate-content failed: ${res.status} ${errText}`);
+    }
+    return (await res.json()) as { text?: string };
+  }
+
+  const response = await ai.models.generateContent(params as any);
+  return { text: response.text };
+}
+
+async function embedViaProxyOrDirect(params: {
+  model: string;
+  contents: string[];
+}): Promise<{ embeddings: { values: number[] }[] }> {
+  if (isBrowser) {
+    const res = await fetch("/api/gemini/embed-content", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`Proxy embed-content failed: ${res.status} ${errText}`);
+    }
+    return (await res.json()) as { embeddings: { values: number[] }[] };
+  }
+
+  const response = await ai.models.embedContent(params as any);
+  return { embeddings: (response.embeddings || []) as { values: number[] }[] };
+}
+
+const PRIMARY_EMBEDDING_MODEL = "text-embedding-004";
+const FALLBACK_EMBEDDING_MODEL = "gemini-embedding-2-preview";
+
+async function embedWithFallback(contents: string[]): Promise<{ values: number[] }[]> {
+  try {
+    const r = await embedViaProxyOrDirect({ model: PRIMARY_EMBEDDING_MODEL, contents });
+    return r.embeddings;
+  } catch (e) {
+    console.warn(`[embedding] primary model failed (${PRIMARY_EMBEDDING_MODEL}), falling back`, e);
+    const r = await embedViaProxyOrDirect({ model: FALLBACK_EMBEDDING_MODEL, contents });
+    return r.embeddings;
+  }
+}
 
 export interface FunnelScript {
   q1: { suggestedId: string; question: string; isStale?: boolean };
@@ -112,26 +175,13 @@ export function preprocessInput(rawText: string): string[] {
 export async function extractFeatures(taskText: string): Promise<TaskFeatures> {
   const intentValues = Object.values(TaskIntent).join(", ");
 
-  const prompt = `
-    You are a task analysis expert. Please analyze the following task text, extract 4 structured features, and return them as JSON in one go.
-
-    Task Text: "${taskText}"
-
-    Field Definitions:
-    - has_deliverable: Whether there is a clear deliverable output (specific outputs such as documents/reports/emails/code/PPT, etc.). true means there is a deliverable, false means it is a vague goal/broad direction.
-    - scope: Task scale —— "small"(1-2 hours), "medium"(half a day), "large"(multiple days/rounds)
-    - domain: The intent domain to which the task belongs, must be selected exactly from the following enumeration values: ${intentValues}
-    - urgency: Time urgency —— "today", "this_week", "open"
-    - estimated_duration: Estimated completion time (minutes), integer
-    - title: Refined standardized task title (4-12 words, remove colloquial expressions)
-
-    Judgment Rules (has_deliverable):
-    - Examples of true: "Write a competitor analysis report", "Send an email to Manager Zhang", "Update resume", "Submit code PR", "Prepare debrief PPT"
-    - Examples of false: "Improve workplace influence", "Learn English well", "Improve intimate relationships", "Prepare for postgraduate entrance exams", "Enhance physical fitness"
-    `;
+  const prompt = fillTemplate(SKILL.misc.featureExtraction, {
+    TASK_TEXT: taskText,
+    INTENT_VALUES: intentValues,
+  });
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await generateViaProxyOrDirect({
       model: "gemini-3-flash-preview",
       contents: prompt,
       config: {
@@ -176,55 +226,13 @@ export interface SkillChainConfig {
   scopeInstruction: string;
 }
 
-// Domain-specific prompt templates (from PRD)
-const DOMAIN_PROMPTS: Record<TaskIntent, string> = {
-  [TaskIntent.CAREER_BREAK]: `
-# Role: Expert-level Workplace Coach at Top Tech Companies
-# Domain Logic (Career):
-- Decomposition Focus: Emphasize the "Impact" and "Closure" of tasks
-- Linear Mode: Pre-action must include "Align Requirements/Obtain Data"; Post-action must include "Sync Progress/Document Results"
-- Dimensional Mode: Expand from three dimensions: "Business Contribution", "Self-Growth", "Workplace Relationships"
-# Tone: Extremely concise and result-driven`,
-
-  [TaskIntent.WEALTH_CONTROL]: `
-# Role: Senior Financial Planner
-# Domain Logic (Wealth):
-- Decomposition Focus: Emphasize "Objective Facts" over "Subjective Feelings"
-- Linear Mode: Pre-action must include "Reconcile Accounts/Obtain Current Prices"; Core must include "Logical Verification/Risk Assessment"
-- Dimensional Mode: Decompose from three dimensions: "Income & Expense Control", "Asset Allocation", "Risk Prevention"
-# Tone: Prudent, objective, and data-driven`,
-
-  [TaskIntent.BODY_MIND]: `
-# Role: Psychological Mediator & Energy Healer
-# Domain Logic (Body & Mind):
-- Decomposition Focus: Minimize Pre-action drastically and convert all steps into "Physical Actions"
-- Linear Mode: Starter must not involve electronic products (except for white noise); Core must emphasize breathing or physical movements
-- Dimensional Mode: Approach from three dimensions: "Environment Adjustment (Light/Sound)", "Physical Relaxation", "Mental Unloading"
-# Tone: Gentle, minimalist, and stress-free`,
-
-  [TaskIntent.ACADEMIC_SPRINT]: `
-# Role: Expert in Efficient Learning Strategies
-# Domain Logic (Academic):
-- Decomposition Focus: Lower the "Initiation Barrier" and materialize abstract knowledge
-- Linear Mode: Starter must be "Open a specific document/software"; Core must include the closed loop of "Understand - Internalize - Produce"
-- Dimensional Mode: Decompose from three dimensions: "Basic Input (Reading/Listening)", "In-depth Digestion (Practice/Writing)", "Review & Assessment"
-# Tone: Rigorous, structured, and highly guiding`,
-
-  [TaskIntent.DEEP_CONNECT]: `
-# Role: Interpersonal Relationship & Emotional Counselor
-# Domain Logic (Connection):
-- Decomposition Focus: Focus not only on "tasks" but also on "the other party's experience"
-- Linear Mode: Pre-action must include "Prepare Environment/Confirm the Other Party's Preferences"; Post-action must include "Emotional Feedback/Schedule Next Meeting"
-- Dimensional Mode: Expand from three dimensions: "Physical Environment Setup", "Communication Topic Design", "Emotional Value Provision"
-# Tone: Delicate, warm, and empathetic`,
-
-  [TaskIntent.INNER_WILD]: `
-# Role: Creative Director & Travel Explorer
-# Domain Logic (Spiritual):
-- Decomposition Focus: Abandon KPI-oriented approach and emphasize "Serendipity" and "Inspiration"
-- Linear Mode: Starter must be a "small observation that sparks curiosity"; Core emphasizes "Immersive Experience"
-- Dimensional Mode: Expand from three dimensions: "Sensory Exploration", "Creative Output", "Self-dialogue"
-# Tone: Romantic, divergent, and full of curiosity`,
+const DOMAIN_SKILLS: Record<TaskIntent, string> = {
+  [TaskIntent.CAREER_BREAK]: SKILL.domains.careerBreak,
+  [TaskIntent.WEALTH_CONTROL]: SKILL.domains.wealthControl,
+  [TaskIntent.BODY_MIND]: SKILL.domains.bodyMind,
+  [TaskIntent.ACADEMIC_SPRINT]: SKILL.domains.academicSprint,
+  [TaskIntent.DEEP_CONNECT]: SKILL.domains.deepConnect,
+  [TaskIntent.INNER_WILD]: SKILL.domains.innerWild,
 };
 
 const SCOPE_INSTRUCTIONS: Record<TaskScope, string> = {
@@ -235,7 +243,7 @@ const SCOPE_INSTRUCTIONS: Record<TaskScope, string> = {
 
 export function skillsRouter(features: TaskFeatures): SkillChainConfig {
   const path: DecompositionType = features.has_deliverable ? "LINEAR" : "DIMENSIONAL";
-  const domainPrompt = DOMAIN_PROMPTS[features.domain] || DOMAIN_PROMPTS[TaskIntent.CAREER_BREAK];
+  const domainPrompt = DOMAIN_SKILLS[features.domain] || DOMAIN_SKILLS[TaskIntent.CAREER_BREAK];
   const scopeInstruction = SCOPE_INSTRUCTIONS[features.scope];
 
   return { path, domainPrompt, scopeInstruction };
@@ -258,51 +266,15 @@ async function executeLinearChain(
       ? "To be completed within this week. Arrange the pace reasonably."
       : "Flexible timeline, allowing for in-depth planning.";
 
-  const prompt = `
-${config.domainPrompt}
+  const prompt = fillTemplate(SKILL.chains.linearDecomposer, {
+    DOMAIN_SKILL: config.domainPrompt,
+    URGENCY_NOTE: urgencyNote,
+    SCOPE_INSTRUCTION: config.scopeInstruction,
+    TASK_TEXT: taskText,
+    TASK_TITLE: features.title,
+  });
 
-You are now executing the LINEAR skill chain and need to complete the following three atomic skills in sequence:
-
-## Skill 1: DeliverableExtractor
-Identify the core deliverables of the task, implicit acceptance criteria (who to send to/what format/deadline), and a clear definition of completion.
-
-## Skill 2: BlockerIdentifier  
-Scan the pre-dependencies of the task (items that must be completed first, otherwise progress cannot be made) and generate a list of pre_actions.
-
-## Skill 3: LinearDecomposer
-Assemble the complete workflow according to the following four-layer framework:
-- Starter: ${urgencyNote} (Format: Must include specific application name or operation object, e.g., "Open XX"/"Send to XX")
-- Pre-actions: Pre-impediment list (each item starts with "-")
-- Core execution: Core execution steps (each item starts with "-", each step has a clear deliverable)
-- Post-actions: Delivery/Closure/Closed-loop items (each item starts with "-")
-
-${config.scopeInstruction}
-
-Task: ${taskText}
-Task Title: ${features.title}
-
-Output Format (Directly output usable Markdown, no JSON wrapping):
-
-**${features.title}** · LINEAR
-
-**Starter (Immediate Action):**
-→ [Specific actionable task within 2 minutes]
-
-**Pre-actions (Preparations):**
-- [Preparatory item 1]
-- [Preparatory item 2] (Omit this layer if none)
-
-**Core execution (Core Implementation):**
-- [Step 1] → Deliverable: [Deliverable item]
-- [Step 2] → Deliverable: [Deliverable item]
-- [Step 3] → Deliverable: [Deliverable item]
-
-**Post-actions (Delivery & Closure):**
-- [Closure item 1]
-- [Closure item 2]
-`;
-
-  const response = await ai.models.generateContent({
+  const response = await generateViaProxyOrDirect({
     model: "gemini-3-flash-preview",
     contents: prompt,
   });
@@ -327,54 +299,15 @@ async function executeDimensionalChain(
       ? "Substantial progress must be made within this week, and the subtasks under each dimension must be executable this week."
       : "Adequate time is available for comprehensive planning and in-depth expansion of each dimension.";
 
-  const prompt = `
-${config.domainPrompt}
+  const prompt = fillTemplate(SKILL.chains.dimensionalDecomposer, {
+    DOMAIN_SKILL: config.domainPrompt,
+    SCOPE_INSTRUCTION: config.scopeInstruction,
+    URGENCY_NOTE: urgencyNote,
+    TASK_TEXT: taskText,
+    TASK_TITLE: features.title,
+  });
 
-You are now executing the DIMENSIONAL skill chain and need to complete the following three atomic skills in sequence:
-
-## Skill 1: ObjectiveExtractor
-Extract from vague intentions:
-1. Core Objective (one-sentence description)
-2. Specific success criteria achievable within 3 months (quantifiable or perceptible change description, not vague expressions like "do better")
-
-## Skill 2: DimensionMapper (MECE Principle)
-Identify 3-5 mutually independent promotion dimensions, following these rules:
-- Each dimension represents a key leverage point for achieving the objective
-- No sequential dependencies between dimensions; they can be initiated in parallel
-- If the domain prompt specifies a particular dimensional framework, prioritize using that framework
-
-## Skill 3: DimensionalDecomposer
-Generate 2-3 specific subtasks executable this week under each dimension, with each subtask including:
-- Specific action description (starts with a verb)
-- Estimated time duration
-
-${config.scopeInstruction}
-${urgencyNote}
-
-Task: ${taskText}
-Task Title: ${features.title}
-
-Output Format (Directly output usable Markdown):
-
-**${features.title}** · DIMENSIONAL
-
-**Core Objective:** [One-sentence objective]
-**Success Criteria (3 months):** [Quantifiable/perceptible specific change]
-
-**Dimension 1: [Dimension Name]**
-- [Subtask 1] (Estimated: Xh)
-- [Subtask 2] (Estimated: Xh)
-
-**Dimension 2: [Dimension Name]**
-- [Subtask 1] (Estimated: Xh)
-- [Subtask 2] (Estimated: Xh)
-
-**Dimension 3: [Dimension Name]**
-- [Subtask 1] (Estimated: Xh)
-- [Subtask 2] (Estimated: Xh)
-`;
-
-  const response = await ai.models.generateContent({
+  const response = await generateViaProxyOrDirect({
     model: "gemini-3-flash-preview",
     contents: prompt,
   });
@@ -403,8 +336,8 @@ export async function processTaskWithSkills(
       const taskString = `task：${features.title}。`;
       const allStrings = [...targetStrings, taskString];
       
-      const embedResult = await ai.models.embedContent({
-        model: 'gemini-embedding-3-preview',
+      const embedResult = await embedViaProxyOrDirect({
+        model: 'gemini-embedding-2-preview',
         contents: allStrings,
       });
       
@@ -456,7 +389,7 @@ export async function processTaskWithSkills(
 }
 
 export const parseBrainDump = async (text: string, focusThemes: FocusTheme[] = [], iceboxTasks: Task[] = [], userProfile?: UserProfile): Promise<Partial<Task>[]> => {
-  if (!process.env.GEMINI_API_KEY) {
+  if (!isBrowser && !GEMINI_API_KEY) {
     console.warn("No API Key provided, returning mock data");
     return mockParse(text);
   }
@@ -535,169 +468,130 @@ export const generateFunnelScript = async (
   currentTime: string,
   iceboxTasks: Task[] = []
 ): Promise<FunnelScript> => {
-  if (!process.env.GEMINI_API_KEY) return mockFunnelScript(isSubsequent, candidateTasks, existingAnchors);
-
-  const candidateJson = JSON.stringify(candidateTasks.map(t => ({ id: t.id, title: t.title, isRevived: t.isRevived })));
-  const anchorJson = JSON.stringify(existingAnchors.map(t => ({ id: t.id, title: t.title })));
-  const iceboxJson = JSON.stringify(iceboxTasks.map(t => ({ 
-    id: t.id, 
-    title: t.title, 
-    frozenSince: t.frozenSince 
-  })));
-  
-  // 3. Construct Dynamic Prompt Context
-  let themeContext = '';
-  let fallbackInstruction = '';
-  const hasThemes = focusThemes.length > 0;
-
-  if (hasThemes) {
-    const themeString = focusThemes.map(t => `【${t.intent}: ${(t.tags || []).join(', ')}】`).join('; ');
-    themeContext = `Current user's quarterly focus themes are: ${themeString}.`;
-    fallbackInstruction = `When evaluating task value, strictly refer to the above focus themes.`;
-  } else {
-    themeContext = `User currently has not set quarterly long-term goals.`;
-    fallbackInstruction = `When evaluating task value, please degrade to evaluating its [Daily Sense of Accomplishment].`;
+  // If no quarterly themes, keep the previous lightweight fallback behavior.
+  // (Relevance scoring requires a target vector.)
+  if (focusThemes.length === 0) {
+    return mockFunnelScript(isSubsequent, candidateTasks, existingAnchors);
   }
 
-  let prompt = "";
-  
-  // Determine Scenario
-  const hasIcebox = iceboxTasks.length > 0;
+  const themeString = focusThemes
+    .map(t => `【${t.intent}: ${(t.tags || []).join(', ')}】`)
+    .join('; ');
+  const themeEmbeddingText = `Quarterly focus themes: ${themeString}`;
 
-  if (!isSubsequent && hasIcebox) {
-    // --- NEW SCENARIO: First Time + Icebox ---
-    prompt = `
-      [System]
-      You are a top-tier GTD efficiency coach.
-      ${themeContext}
-      ${fallbackInstruction}
-      
-      New Candidates (some might be revived): ${candidateJson}
-      Icebox Tasks: ${iceboxJson}
-      
-      [Instructions]
-      Strictly output the following JSON structure:
-      {
-        "q1_subtraction": {
-          "suggestedId": "ID of task to move to drawer",
-          "question": "If no icebox task > 3 days old: Suggest moving a trivial NEW task to drawer. If icebox task > 3 days old exists: Ask if we should keep freezing it or move to drawer.",
-          "isStale": "boolean, true if referring to an icebox task > 3 days old"
-        },
-        "q2_leverage": {
-          "suggestedId": "ID of the best task (New or Icebox) matching themes",
-          "mergedTaskId": "If a new task matches an icebox task semantically, return the ID here",
-          "question": "If merged: 'Detected duplicate intent, revived [Task]...'. If not merged: 'I see [New Task], but [Icebox Task] fits your theme better. Revive old or stick to new?'",
-          "isMerged": "boolean"
-        },
-        "q3_icebreaker": {
-          "suggestedId": "ID of easiest task to start",
-          "question": "Starting is hard. [Task Name] seems easiest. Make it Icebreaker?"
-        },
-        "q4_confirmation": {
-          "question": "Energy balance check. Pick one last Anchor from remaining or Icebox. (If icebox task > 5 days, suggest deleting it).",
-          "isStale": "boolean, true if referring to icebox task > 5 days"
-        }
-      }
-    `;
-  } else if (!isSubsequent) {
-    // --- First Time (No Icebox) ---
-    prompt = `
-      [System]
-      You are a top-tier GTD efficiency coach.
-      ${themeContext}
-      ${fallbackInstruction}
-      
-      Analyze the following candidate tasks: ${candidateJson}.
-      
-      [Instructions]
-      Strictly output the following JSON structure:
-      {
-        "q1_trivial": {
-          "suggestedId": "ID of the task with lowest relevance or most trivial",
-          "question": "I noticed [Task Name] seems unrelated to your core themes. Shall we move it to the drawer?"
-        },
-        "q2_leverage": {
-          "suggestedId": "ID of the task best fitting quarterly goals",
-          "question": "AI calculates [Task Name] contributes most to [Goal]. Is it your first domino?"
-        },
-        "q3_icebreaker": {
-          "suggestedId": "ID of the task with shortest duration or lowest friction",
-          "question": "Starting is hard. [Task Name] seems easiest to start. Shall we make it your Icebreaker?"
-        },
-        "q4_final": {
-          "question": "Only 1 slot left. Which of the remaining tasks will make you feel most accomplished tonight?"
-        }
-      }
-    `;
-  } else {
-    // --- Subsequent ---
-    prompt = `
-      [System]
-      Current Time: ${currentTime}.
-      ${themeContext}
-      ${fallbackInstruction}
-      
-      User has unfinished anchors: ${anchorJson}.
-      User entered new tasks: ${candidateJson}.
-      
-      [Instructions]
-      Strictly output the following JSON structure:
-      {
-        "q1_trivial": {
-          "suggestedId": "ID of a trivial task from new tasks",
-          "question": "Caught new ideas. [Task Name] seems executable without much thought. Shall we put it in the drawer?"
-        },
-        "q2_pk": {
-          "newChallengerId": "ID of the highest value new task",
-          "oldDefenderId": "ID of the lowest value/urgency existing anchor",
-          "question": "Unexpected! [New Task] looks more impactful than [Old Anchor]. Willing to swap [Old Anchor] to drawer?"
-        },
-        "q3_energy": {
-          "question": "It is ${currentTime}. Adding a core task might mean overtime. Are you sure you want to challenge the following items?"
-        }
-      }
-    `;
-  }
+  const taskToEmbeddingText = (t: Task) => {
+    const parts = [
+      `title: ${t.title}`,
+      t.intent ? `intent: ${t.intent}` : '',
+      typeof t.duration === 'number' ? `duration_min: ${t.duration}` : '',
+      t.decomposition_type ? `decomposition_type: ${t.decomposition_type}` : '',
+      t.workflowNote ? `workflow: ${t.workflowNote}` : '',
+    ].filter(Boolean);
+    return parts.join('\n');
+  };
+
+  const allTasks = [...candidateTasks, ...iceboxTasks, ...existingAnchors];
+  const embedInputs = [themeEmbeddingText, ...allTasks.map(taskToEmbeddingText)];
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-      config: { responseMimeType: "application/json" }
+    const embeddings = await embedWithFallback(embedInputs);
+    const themeVec = embeddings[0]?.values;
+    if (!themeVec) return mockFunnelScript(isSubsequent, candidateTasks, existingAnchors);
+
+    const scoreById = new Map<string, number>();
+    allTasks.forEach((t, idx) => {
+      const vec = embeddings[idx + 1]?.values;
+      if (!vec) return;
+      scoreById.set(t.id, cosineSimilarity(themeVec, vec));
     });
-    
-    const raw = JSON.parse(response.text || "{}");
-    
-    // Map raw response to FunnelScript
-    if (!isSubsequent && hasIcebox) {
-         return {
-            q1: { ...raw.q1_subtraction },
-            q2: { ...raw.q2_leverage },
-            q3: { ...raw.q3_icebreaker },
-            q4: { ...raw.q4_confirmation }
-         };
-    } else if (!isSubsequent) {
+
+    const scored = <T extends Task>(arr: T[]) =>
+      arr
+        .map(t => ({ t, score: scoreById.get(t.id) ?? 0 }))
+        .sort((a, b) => b.score - a.score);
+
+    const scoredCandidates = scored(candidateTasks);
+    const scoredIcebox = scored(iceboxTasks);
+    const scoredAnchors = scored(existingAnchors);
+
+    const leastCandidate = scoredCandidates[scoredCandidates.length - 1]?.t;
+    const bestCandidate = scoredCandidates[0]?.t;
+    const bestIcebox = scoredIcebox[0]?.t;
+    const bestOverall = scored([...(candidateTasks || []), ...(iceboxTasks || [])])[0]?.t;
+
+    const easiestCandidate = [...candidateTasks].sort((a, b) => (a.duration || 999) - (b.duration || 999))[0];
+
+    const hasIcebox = iceboxTasks.length > 0;
+
+    if (!isSubsequent) {
+      if (hasIcebox) {
+        const newPick = bestCandidate;
+        const icePick = bestIcebox;
+        const overallPick = bestOverall || bestCandidate || bestIcebox || candidateTasks[0];
+
+        return {
+          q1: {
+            suggestedId: (leastCandidate || candidateTasks[0])?.id,
+            question: `Subtraction: "${(leastCandidate || candidateTasks[0])?.title}" is least aligned with your quarterly themes. Move it to drawer?`,
+          },
+          q2: {
+            suggestedId: overallPick?.id,
+            mergedTaskId: undefined,
+            isMerged: false,
+            question: `Leverage: Best-aligned new task is "${newPick?.title}". Best-aligned icebox task is "${icePick?.title}". Which should be your Keystone today?`,
+          },
+          q3: {
+            suggestedId: easiestCandidate?.id,
+            question: `Icebreaker: "${easiestCandidate?.title}" looks easiest to start. Make it your Icebreaker?`,
+          },
+          q4: {
+            question: "Final slot: choose one last Anchor from the remaining items that best supports your quarterly themes.",
+          },
+        };
+      }
+
       return {
-        q1: raw.q1_trivial,
-        q2: raw.q2_leverage,
-        q3: raw.q3_icebreaker,
-        q4: raw.q4_final
-      };
-    } else {
-      return {
-        q1: raw.q1_trivial,
-        q2: { 
-          suggestedId: raw.q2_pk?.newChallengerId, 
-          oldDefenderId: raw.q2_pk?.oldDefenderId, 
-          question: raw.q2_pk?.question 
+        q1: {
+          suggestedId: (leastCandidate || candidateTasks[0])?.id,
+          question: `Subtraction: "${(leastCandidate || candidateTasks[0])?.title}" is least aligned with your quarterly themes. Move it to drawer?`,
         },
-        q3: { question: raw.q3_energy?.question },
-        q4: { question: "This is the final lineup. Confirm?" }
+        q2: {
+          suggestedId: (bestCandidate || candidateTasks[0])?.id,
+          question: `Leverage: "${(bestCandidate || candidateTasks[0])?.title}" is most aligned with your quarterly themes. Make it your Keystone?`,
+        },
+        q3: {
+          suggestedId: easiestCandidate?.id,
+          question: `Icebreaker: "${easiestCandidate?.title}" looks easiest to start. Make it your Icebreaker?`,
+        },
+        q4: {
+          question: "Final slot: choose one last Anchor from the remaining items that best supports your quarterly themes.",
+        },
       };
     }
 
+    // Subsequent mode (PK): challenger = best new candidate, defender = least aligned existing anchor
+    const challenger = bestCandidate || candidateTasks[0];
+    const defender = scoredAnchors[scoredAnchors.length - 1]?.t || existingAnchors[0];
+
+    return {
+      q1: {
+        suggestedId: (leastCandidate || candidateTasks[0])?.id,
+        question: `Subtraction: "${(leastCandidate || candidateTasks[0])?.title}" is least aligned with your quarterly themes. Move it to drawer?`,
+      },
+      q2: {
+        suggestedId: challenger?.id,
+        oldDefenderId: defender?.id,
+        question: `PK: "${challenger?.title}" aligns better with your themes than "${defender?.title}". Swap the defender to drawer?`,
+      },
+      q3: {
+        question: `Energy check (${currentTime}): adding a new core task might increase workload. Continue?`,
+      },
+      q4: {
+        question: "Confirm final lineup based on quarterly alignment and today's energy.",
+      },
+    };
   } catch (e) {
-    console.error(e);
+    console.error("Funnel relevance scoring failed:", e);
     return mockFunnelScript(isSubsequent, candidateTasks, existingAnchors);
   }
 };
@@ -715,7 +609,7 @@ const mockFunnelScript = (isSubsequent: boolean, candidates: Task[], anchors: Ta
       q1: { suggestedId: candidates[0]?.id, question: "Skip new trivial?" },
       q2: { suggestedId: candidates[0]?.id, oldDefenderId: anchors[0]?.id, question: "Swap?" },
       q3: { question: "Energy check?" },
-      q4: { question: "Confirm?" }
+      q4: { question: "This is the final formation after adjustments. If these few tasks are completed tonight, will you still be able to get that sense of 'security'?" }
     };
   }
 };
@@ -731,7 +625,7 @@ export const semanticLeafMerge = async (
   focusThemes: FocusTheme[],
   quarterId?: string
 ): Promise<{ action: 'MERGE' | 'CREATE'; targetLeafId?: string; canonicalTitle?: string }> => {
-  if (!process.env.GEMINI_API_KEY) {
+  if (!isBrowser && !GEMINI_API_KEY) {
     return { action: 'CREATE', canonicalTitle: completedTaskTitle.substring(0, 4) };
   }
 
@@ -743,31 +637,14 @@ export const semanticLeafMerge = async (
     const existingLeafJson = JSON.stringify(existingLeafData);
     const themesString = focusThemes.map(t => `${t.intent}: ${(t.tags || []).join(', ')}`).join('; ');
 
-    const prompt = `
-# Role
-You are a "Forest Gardener" proficient in semantic analysis and personal productivity management. Your task is to receive the new task completed by the user and decide whether it should be merged into an existing "task leaf" or grown as a new leaf.
+    const prompt = fillTemplate(SKILL.misc.leafMerge, {
+      EXISTING_LEAVES: existingLeafJson,
+      TASK_TITLE: completedTaskTitle,
+      INTENT: currentIntent || 'Uncategorized',
+      THEMES_CONTEXT: themesString,
+    });
 
-### Input
-- Existing leaf node list: ${existingLeafJson}
-- New completed task title: "${completedTaskTitle}"
-- Associated intent category: ${currentIntent || 'Uncategorized'}
-
-# Rules
-- Merge determination: If the new task is a [sub-step], [different stage] (e.g., first draft vs. final version), or [semantic synonym] of an existing leaf, execute MERGE.
-- Differentiation determination: If the task belongs to the same project but is completely different in nature (e.g., writing code vs. recruiting testers), execute CREATE.
-- Naming convention: For CREATE, generate an abstract and aesthetically pleasing "leaf name" with 2-4 characters.
-- Output JSON:
-   {
-     "action": "MERGE" | "CREATE",
-     "targetLeafId": "string (required if MERGE)",
-     "canonicalTitle": "string (provide a concise 2-4 character name if CREATE)"
-   }
-
-# Intent Context
-User's current 3 key focus intents: ${themesString}
-    `;
-
-    const response = await ai.models.generateContent({
+    const response = await generateViaProxyOrDirect({
       model: 'gemini-3-flash-preview',
       contents: prompt,
       config: {
@@ -803,7 +680,7 @@ export const generateQuarterlyReview = async (
   synergyLinks: SynergyLink[],
   focusThemes: FocusTheme[]
 ): Promise<string> => {
-  if (!process.env.GEMINI_API_KEY) {
+  if (!isBrowser && !GEMINI_API_KEY) {
     return "Your \"Career Breakthrough\" has borne fruit this quarter, but the ecosystem is slightly unbalanced. I noticed you connected \"Architectural Design\" to \"Physical and Mental Restoration\" – this high-quality deep work has indeed brought you greater inner peace. Next month, try watering the Tree of Wealth a little more.";
   }
 
@@ -815,25 +692,13 @@ export const generateQuarterlyReview = async (
     }).filter(Boolean).join(', ');
     const themesContext = focusThemes.map(t => t.intent).join(', ');
 
-    const prompt = `
-# Role
-You are a "Life Coach" with philosophical depth and a background in behavioral psychology. Based on the ecological data of the user's "Intent Forest" for the quarter, write a highly insightful "Quarterly Ecological Audit Report".
+    const prompt = fillTemplate(SKILL.misc.quarterlyReview, {
+      THEMES_CONTEXT: themesContext,
+      FOREST_CONTEXT: forestContext,
+      LINKS_CONTEXT: linksContext,
+    });
 
-# Data
-- Focus Themes: ${themesContext}
-- Forest Leaves (tasks and completion counts): ${forestContext}
-- Cross-Tree Links (compound effect): ${linksContext}
-
-# Analysis Dimensions
-1. Ecological Diversity: Is the growth ratio of the three core intent trees unbalanced?
-2. Compound Effect: Analyze the [cross-intent links] manually established by the user and identify which behaviors have produced positive cross-domain impacts.
-3. Entropy Increase Warning: Analyze the data to identify the user's psychological obstacles or areas that need improvement.
-
-# Tone
-The tone should be warm, wise, and insightful, avoiding a cold, rigid report-like feel. Keep the word count around 150 words.
-    `;
-
-    const response = await ai.models.generateContent({
+    const response = await generateViaProxyOrDirect({
       model: 'gemini-3-flash-preview',
       contents: prompt,
     });
@@ -846,7 +711,7 @@ The tone should be warm, wise, and insightful, avoiding a cold, rigid report-lik
 };
 
 export const generateDomainsForRole = async (roleLabel: string): Promise<string[]> => {
-  if (!process.env.GEMINI_API_KEY) {
+  if (!isBrowser && !GEMINI_API_KEY) {
     return ['Product Manager', 'Software Engineer', 'Designer', 'Data Analyst', 'Marketing'];
   }
 
@@ -859,7 +724,7 @@ export const generateDomainsForRole = async (roleLabel: string): Promise<string[
       Example: ["Growth PM", "Operations", "Marketing", "Data Analyst"]
     `;
 
-    const response = await ai.models.generateContent({
+    const response = await generateViaProxyOrDirect({
       model: 'gemini-3-flash-preview',
       contents: prompt,
       config: {
@@ -882,7 +747,7 @@ export const generateDomainsForRole = async (roleLabel: string): Promise<string[
 };
 
 export const generateFocusTags = async (intent: TaskIntent, recentTasks: Task[]): Promise<string[]> => {
-  if (!process.env.GEMINI_API_KEY) return [];
+  if (!isBrowser && !GEMINI_API_KEY) return [];
 
   try {
     const taskContext = recentTasks.length > 0 
@@ -899,7 +764,7 @@ export const generateFocusTags = async (intent: TaskIntent, recentTasks: Task[])
       Return the result as a JSON array of 3 strings.
     `;
 
-    const response = await ai.models.generateContent({
+    const response = await generateViaProxyOrDirect({
       model: 'gemini-3-flash-preview',
       contents: prompt,
       config: {

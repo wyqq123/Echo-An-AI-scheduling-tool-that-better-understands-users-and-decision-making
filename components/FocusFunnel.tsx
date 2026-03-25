@@ -233,7 +233,11 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [], us
            const challengerId = funnelScript.q2.suggestedId;
            if (selectedIds.includes(challengerId)) {
                // Swap confirmed (Challenger became ANCHOR above)
-               // Defender logic handled in finalizeAndEmit
+               // Defender goes to PENDING
+               const defender = existingTasks.find(t => t.id === funnelScript.q2.oldDefenderId);
+               if (defender) {
+                   nextTasks.push({ ...defender, status: TaskStatus.PENDING, isAnchor: false, startTime: undefined });
+               }
            } else {
                // Swap rejected. Challenger goes to PENDING.
                nextTasks = nextTasks.map(t => t.id === challengerId ? { ...t, status: TaskStatus.PENDING } : t);
@@ -269,30 +273,102 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [], us
         }
         
         nextStep = FunnelStep.STEP_4_SACRIFICE;
-        setSelectedIds([]);
+        if (isSubsequentMode) {
+            let existingAnchors = existingTasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
+            const newAnchors = nextTasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
+            
+            if (funnelScript?.q2.oldDefenderId && funnelScript?.q2.suggestedId) {
+                const challenger = nextTasks.find(t => t.id === funnelScript.q2.suggestedId);
+                if (challenger && challenger.status === TaskStatus.ANCHOR) {
+                    existingAnchors = existingAnchors.filter(t => t.id !== funnelScript.q2.oldDefenderId);
+                }
+            }
+            
+            const allAnchorIds = Array.from(new Set([...existingAnchors.map(t => t.id), ...newAnchors.map(t => t.id)]));
+            setSelectedIds(allAnchorIds);
+        } else {
+            setSelectedIds([]);
+        }
         break;
 
       case FunnelStep.STEP_4_SACRIFICE:
         // Q4: Confirmation
-        // User picks one last Anchor from Remaining Candidates OR Icebox.
-        // Or "None" -> All remaining Candidates -> PENDING.
-        
-        if (selectedIds.length > 0) {
-            const targetId = selectedIds[0];
-            const inGenerated = nextTasks.find(t => t.id === targetId);
-            if (inGenerated) {
-                nextTasks = nextTasks.map(t => t.id === targetId ? { ...t, status: TaskStatus.ANCHOR } : t);
-            } else {
-                const inIcebox = iceboxTasks.find(t => t.id === targetId);
-                if (inIcebox) {
-                    nextTasks.push({ ...inIcebox, status: TaskStatus.ANCHOR, isFrozen: false });
+        if (!isSubsequentMode) {
+            // First time: User picks one last Anchor from Remaining Candidates OR Icebox.
+            if (selectedIds.length > 0) {
+                const targetId = selectedIds[0];
+                const inGenerated = nextTasks.find(t => t.id === targetId);
+                if (inGenerated) {
+                    nextTasks = nextTasks.map(t => t.id === targetId ? { ...t, status: TaskStatus.ANCHOR } : t);
+                } else {
+                    const inIcebox = iceboxTasks.find(t => t.id === targetId);
+                    if (inIcebox) {
+                        nextTasks.push({ ...inIcebox, status: TaskStatus.ANCHOR, isFrozen: false });
+                    }
                 }
             }
-        }
-        
-        if (!isSubsequentMode) {
-             // Remaining Candidates -> PENDING
-             nextTasks = nextTasks.map(t => t.status === TaskStatus.CANDIDATE ? { ...t, status: TaskStatus.PENDING } : t);
+            // Remaining Candidates -> PENDING
+            nextTasks = nextTasks.map(t => t.status === TaskStatus.CANDIDATE ? { ...t, status: TaskStatus.PENDING } : t);
+        } else {
+            // Subsequent Mode: Multi-select from all anchors (existing + new).
+            // Selected ones remain/become ANCHOR. Unselected ones become PENDING.
+            
+            // 1. Update new tasks that were anchors
+            nextTasks = nextTasks.map(t => {
+                if (t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER) {
+                    if (selectedIds.includes(t.id)) {
+                        return { ...t, status: TaskStatus.ANCHOR };
+                    } else {
+                        return { ...t, status: TaskStatus.PENDING, isAnchor: false, startTime: undefined };
+                    }
+                }
+                return t;
+            });
+            
+            // 2. Handle existing anchors
+            let existingAnchors = existingTasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
+            
+            // Exclude defender if challenger was selected in Q2
+            if (funnelScript?.q2.oldDefenderId && funnelScript?.q2.suggestedId) {
+                const challenger = nextTasks.find(t => t.id === funnelScript.q2.suggestedId);
+                // In Q4, challenger might have been unselected and became PENDING, but we still exclude defender from Q4 options
+                // Wait, if challenger became PENDING in Q4, the swap is effectively cancelled?
+                // Actually, if challenger was selected in Q2, it became ANCHOR.
+                // If it was unselected in Q4, it becomes PENDING.
+                // The defender was excluded from Q4 options, so it couldn't be selected.
+                // So defender should remain PENDING.
+                // We just check if challenger was selected in Q2. We don't need to check its current status.
+                // But wait, how do we know if it was selected in Q2?
+                // If it was selected in Q2, its status was set to ANCHOR.
+                // So we can check if it WAS an anchor before Q4. But we just modified nextTasks!
+                // Let's just check if it's in the original `generatedTasks` as ANCHOR.
+                const challengerInGenerated = generatedTasks.find(t => t.id === funnelScript.q2.suggestedId);
+                if (challengerInGenerated && challengerInGenerated.status === TaskStatus.ANCHOR) {
+                    existingAnchors = existingAnchors.filter(t => t.id !== funnelScript.q2.oldDefenderId);
+                }
+            }
+
+            existingAnchors.forEach(ea => {
+                if (!selectedIds.includes(ea.id)) {
+                    // It was unselected, so we need to move it to PENDING
+                    const inNext = nextTasks.find(t => t.id === ea.id);
+                    if (inNext) {
+                        inNext.status = TaskStatus.PENDING;
+                        inNext.isAnchor = false;
+                        inNext.startTime = undefined;
+                    } else {
+                        nextTasks.push({ ...ea, status: TaskStatus.PENDING, isAnchor: false, startTime: undefined });
+                    }
+                } else {
+                    // It was selected, ensure it's ANCHOR
+                    const inNext = nextTasks.find(t => t.id === ea.id);
+                    if (inNext) {
+                        inNext.status = TaskStatus.ANCHOR;
+                    } else {
+                        nextTasks.push({ ...ea, status: TaskStatus.ANCHOR });
+                    }
+                }
+            });
         }
         
         nextStep = null; // Finish
@@ -310,24 +386,7 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [], us
   };
 
   const finalizeAndEmit = (finalTasks: Task[]) => {
-      // Logic to handle "PK" swap for existing tasks
       let tasksToEmit = [...finalTasks];
-      
-      if (isSubsequentMode && funnelScript?.q2.oldDefenderId) {
-          const challengerId = funnelScript.q2.suggestedId;
-          const defenderId = funnelScript.q2.oldDefenderId;
-          
-          // Check if challenger became ANCHOR (meaning swap happened)
-          const challenger = finalTasks.find(t => t.id === challengerId);
-          if (challenger && challenger.status === TaskStatus.ANCHOR) {
-              // We need to emit an update for the defender to become PENDING
-              const defender = existingTasks.find(t => t.id === defenderId);
-              if (defender) {
-                  tasksToEmit.push({ ...defender, status: TaskStatus.PENDING, isAnchor: false, startTime: undefined });
-              }
-          }
-      }
-
       assignFinalTimes(tasksToEmit);
   };
 
@@ -337,21 +396,18 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [], us
     // 1. Determine start time based on existing anchors
     let startMinutes = 9 * 60; // Default 9:00 AM
 
-    // Check if we are swapping out a defender
-    let defenderId: string | undefined;
-    if (isSubsequentMode && funnelScript?.q2.oldDefenderId) {
-        // If the defender is in the tasks list with PENDING status, it means it was swapped out
-        const defender = tasks.find(t => t.id === funnelScript.q2.oldDefenderId);
-        if (defender && defender.status === TaskStatus.PENDING) {
-            defenderId = defender.id;
+    // Filter existing anchors to find the latest end time, excluding any that were unselected (marked PENDING)
+    const activeExistingAnchors = existingTasks.filter(t => {
+        if (t.status !== TaskStatus.ANCHOR && t.status !== TaskStatus.ICEBREAKER) return false;
+        
+        // Check if it was modified to PENDING in the funnel
+        const inFinalTasks = tasks.find(ft => ft.id === t.id);
+        if (inFinalTasks && inFinalTasks.status === TaskStatus.PENDING) {
+            return false;
         }
-    }
-
-    // Filter existing anchors to find the latest end time, excluding the swapped defender
-    const activeExistingAnchors = existingTasks.filter(t => 
-        (t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER) && 
-        t.id !== defenderId
-    );
+        
+        return true;
+    });
 
     if (activeExistingAnchors.length > 0) {
         activeExistingAnchors.forEach(t => {
@@ -363,8 +419,11 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [], us
         });
     }
 
-    // 2. Identify New Icebreaker/Anchors to schedule
-    const anchorsToSchedule = tasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
+    // 2. Identify New Icebreaker/Anchors to schedule (only those without a startTime)
+    const anchorsToSchedule = tasks.filter(t => 
+        (t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER) && 
+        !t.startTime
+    );
     
     // 3. Apply times sequentially
     let currentMinutes = startMinutes;
@@ -382,7 +441,7 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [], us
     });
 
     const finalized = tasks.map(t => {
-      // If it's scheduled (Icebreaker or Anchor)
+      // If it's newly scheduled (Icebreaker or Anchor)
       if (timeMap.has(t.id)) {
         return { 
             ...t, 
@@ -391,6 +450,11 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [], us
             isAnchor: true,
             isFrozen: false
         };
+      }
+      
+      // If it's an existing anchor that was kept
+      if ((t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER) && t.startTime) {
+          return t;
       }
       
       // If it's DRAWER or PENDING (Pool tasks)
@@ -468,8 +532,16 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [], us
             return [...candidates, ...iceboxTasks];
         } else {
             // Subsequent: Show ALL Global Anchors (Existing + New)
-            const existingAnchors = existingTasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
+            let existingAnchors = existingTasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
             const newAnchors = tasks.filter(t => t.status === TaskStatus.ANCHOR || t.status === TaskStatus.ICEBREAKER);
+            
+            // Exclude defender if challenger was selected in Q2
+            if (funnelScript?.q2.oldDefenderId && funnelScript?.q2.suggestedId) {
+                const challenger = newAnchors.find(t => t.id === funnelScript.q2.suggestedId);
+                if (challenger) {
+                    existingAnchors = existingAnchors.filter(t => t.id !== funnelScript.q2.oldDefenderId);
+                }
+            }
             
             const allAnchors = [...existingAnchors];
             newAnchors.forEach(na => {
@@ -763,7 +835,7 @@ const FocusFunnel: React.FC<Props> = ({ onTasksGenerated, existingTasks = [], us
                     >
                       {currentStep === FunnelStep.STEP_2_LEVERAGE && (isSubsequentMode ? "Confirm Swap" : "Confirm Keystone")}
                       {currentStep === FunnelStep.STEP_3_FRICTION && (isSubsequentMode ? "Confirm Challenge" : "Set Icebreaker")}
-                      {currentStep === FunnelStep.STEP_4_SACRIFICE && (isSubsequentMode ? "Confirm Lineup" : "Lock Final Anchor")}
+                      {currentStep === FunnelStep.STEP_4_SACRIFICE && (isSubsequentMode ? "Confirm" : "Lock Final Anchor")}
                     </button>
                 )}
 
